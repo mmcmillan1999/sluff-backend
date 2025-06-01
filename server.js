@@ -1,4 +1,4 @@
-// --- Backend/server.js (INCREMENTAL BUILD - STEP 3 - Add submitName and disconnect logic) ---
+// --- Backend/server.js (INCREMENTAL BUILD - STEP 4.0 - Server-Side Ready/Start Logic) ---
 require("dotenv").config(); 
 const http = require("http");
 const { Server } = require("socket.io");
@@ -8,17 +8,18 @@ const cors = require("cors");
 const app = express();
 const server = http.createServer(app);
 
-console.log("INCREMENTAL SERVER (Step 3): Initializing Socket.IO Server...");
+const SERVER_VERSION = "vS4.0"; // Server version
+console.log(`INCREMENTAL SERVER (${SERVER_VERSION}): Initializing...`);
 
 const io = new Server(server, {
   cors: { origin: "*", methods: ["GET", "POST"], credentials: true },
   transports: ['polling', 'websocket']
 });
 
-console.log("INCREMENTAL SERVER (Step 3): Socket.IO Server initialized.");
+console.log(`INCREMENTAL SERVER (${SERVER_VERSION}): Socket.IO Server initialized.`);
 
 io.engine.on("connection_error", (err) => {
-  console.error("!!!! [SOCKET.IO ENGINE EVENT] Connection Error !!!!");
+  console.error(`!!!! [${SERVER_VERSION} ENGINE EVENT] Connection Error !!!!`);
   console.error(`!!!!    Error Code: ${err.code}`);
   console.error(`!!!!    Error Message: ${err.message}`);
   if (err.context) console.error(`!!!!    Error Context:`, err.context);
@@ -34,7 +35,7 @@ const SUITS = { H: "Hearts", D: "Diamonds", C: "Clubs", S: "Spades" };
 const RANKS_ORDER = ["6", "7", "8", "9", "J", "Q", "K", "10", "A"]; 
 const CARD_POINT_VALUES = { "A": 11, "10": 10, "K": 4, "Q": 3, "J": 2, "9":0, "8":0, "7":0, "6":0 };
 const BID_HIERARCHY = ["Pass", "Frog", "Solo", "Heart Solo"];
-console.log("INCREMENTAL SERVER (Step 3): Global constants defined.");
+console.log(`INCREMENTAL SERVER (${SERVER_VERSION}): Global constants defined.`);
 
 let gameData = {
   state: "Waiting for Players to Join", players: {}, playerSocketIds: [],
@@ -45,7 +46,7 @@ let gameData = {
   trickTurnPlayerName: null, tricksPlayedCount: 0, leadSuitCurrentTrick: null, 
   trumpBroken: false, trickLeaderName: null, capturedTricks: {}, roundSummary: null,
 };
-console.log("INCREMENTAL SERVER (Step 3): Initial gameData structure defined.");
+console.log(`INCREMENTAL SERVER (${SERVER_VERSION}): Initial gameData structure defined.`);
 
 function getPlayerNameById(socketId) {
     return gameData.players[socketId]; 
@@ -65,11 +66,11 @@ function initializeNewRoundState() {
         if(pName) gameData.capturedTricks[pName] = [];
     });
     gameData.roundSummary = null;
-    console.log("[SERVER INCREMENTAL Step 3] New round state initialized.");
+    console.log(`[${SERVER_VERSION}] New round state initialized.`);
 }
 
 function resetFullGameData() {
-    console.log("[SERVER INCREMENTAL Step 3] Performing full game data reset.");
+    console.log(`[${SERVER_VERSION}] Performing full game data reset.`);
     gameData = {
         state: "Waiting for Players to Join", players: {}, playerSocketIds: [],
         playerOrderActive: [], dealer: null, hands: {}, widow: [], originalDealtWidow: [],
@@ -80,107 +81,142 @@ function resetFullGameData() {
         trumpBroken: false, trickLeaderName: null, capturedTricks: {}, roundSummary: null
     };
 }
-console.log("INCREMENTAL SERVER (Step 3): Game reset functions defined.");
+console.log(`INCREMENTAL SERVER (${SERVER_VERSION}): Game reset functions defined.`);
+
+// Helper function for shuffling
+function shuffle(array) {
+  let currentIndex = array.length,  randomIndex;
+  while (currentIndex !== 0) {
+    randomIndex = Math.floor(Math.random() * currentIndex);
+    currentIndex--;
+    [array[currentIndex], array[randomIndex]] = [array[randomIndex], array[currentIndex]];
+  }
+  return array;
+}
 
 app.get("/", (req, res) => {
-  res.send("Incremental Sluff Socket.IO Backend (Step 3) is Running!");
+  res.send(`Incremental Sluff Socket.IO Backend (${SERVER_VERSION}) is Running!`);
 });
 
 io.on("connection", (socket) => {
-  console.log(`!!!! [SERVER INCREMENTAL (Step 3) CONNECT] ID: ${socket.id}, Transport: ${socket.conn.transport.name}`);
+  console.log(`!!!! [${SERVER_VERSION} CONNECT] ID: ${socket.id}, Transport: ${socket.conn.transport.name}`);
   socket.emit("gameState", gameData); 
 
-  socket.emit("messageFromServer", { // Kept for basic hello
-    greeting: "Hello from Server (Step 3)!", socketId: socket.id
+  socket.emit("messageFromServer", { 
+    greeting: `Hello from Server (${SERVER_VERSION})!`, socketId: socket.id
   });
 
-  socket.on("clientTestEvent", (data) => { // Kept for testing emits
-    console.log(`[SERVER (Step 3) clientTestEvent] from ${socket.id}:`, data);
-    socket.emit("serverTestResponse", { message: "Server (Step 3) got test!", originalData: data });
+  socket.on("clientTestEvent", (data) => { 
+    console.log(`[${SERVER_VERSION} clientTestEvent] from ${socket.id}:`, data);
+    socket.emit("serverTestResponse", { message: `Server (${SERVER_VERSION}) got test!`, originalData: data });
   });
 
-  // --- ADDED: submitName from full game logic ---
   socket.on("submitName", (name) => {
-    console.log(`[SERVER (Step 3) SUBMITNAME] ID: ${socket.id} Name: "${name}". Players: ${Object.keys(gameData.players).length}, Started: ${gameData.gameStarted}`);
-    if (gameData.players[socket.id] === name) { // Player already submitted this name
-        socket.emit("playerJoined", { playerId: socket.id, name }); 
-        io.emit("gameState", gameData); // Send current state
+    console.log(`[${SERVER_VERSION} SUBMITNAME] ID: ${socket.id} Name: "${name}". Current Players: ${Object.keys(gameData.players).length}, Game Started: ${gameData.gameStarted}`);
+    if (gameData.players[socket.id] === name) {
+        socket.emit("playerJoined", { playerId: socket.id, name });
+        io.emit("gameState", gameData);
         return;
     }
     if (Object.values(gameData.players).includes(name)) {
         return socket.emit("error", "Name already taken.");
     }
-    // For now, let's simplify the 4-player limit check for easier testing of 1-2 players.
-    // We'll add the full player limit logic back later.
-    // if (Object.keys(gameData.players).length >= 4 && !gameData.players[socket.id]) {
-    //     return socket.emit("error", "Room full.");
-    // }
-    // if (gameData.gameStarted && !gameData.players[socket.id] && Object.keys(gameData.players).length >=4) {
-    //     return socket.emit("error", "Game in progress and full.");
-    // }
+    
+    if (Object.keys(gameData.players).length >= 4 && !gameData.players[socket.id]) {
+        return socket.emit("error", "Room full (4 players max).");
+    }
+    if (gameData.gameStarted && !gameData.players[socket.id] && Object.keys(gameData.players).length >=4) {
+         return socket.emit("error", "Game in progress and full.");
+    }
 
     gameData.players[socket.id] = name;
     if (!gameData.playerSocketIds.includes(socket.id)) {
         gameData.playerSocketIds.push(socket.id);
     }
     if(gameData.scores[name] === undefined) {
-        gameData.scores[name] = 120; // Default score from rules
+        gameData.scores[name] = 120; 
     }
-    console.log(`[SERVER (Step 3) SUBMITNAME] ${name} (${socket.id}) joined. Total players: ${Object.keys(gameData.players).length}.`);
-    socket.emit("playerJoined", { playerId: socket.id, name }); // Let this client know its ID
-    io.emit("gameState", gameData); // Update all clients with new player list, scores etc.
+    console.log(`[${SERVER_VERSION} SUBMITNAME] ${name} (${socket.id}) joined. Total players: ${Object.keys(gameData.players).length}.`);
+    socket.emit("playerJoined", { playerId: socket.id, name });
     
-    // Simplified ready check for now, will use full 3 or 4 player logic later
     const numPlayers = Object.keys(gameData.players).length;
-    if (!gameData.gameStarted && numPlayers >= 1 && numPlayers <=4) { // Let's say 1-4 can be "Ready to Start" for testing this step
-      // gameData.state = "Ready to Start"; // We'll manage this more carefully later
-      // For now, just ensure gameData is emitted
+    // --- UNCOMMENTED AND MODIFIED FOR 4 PLAYERS ---
+    if (!gameData.gameStarted && numPlayers === 4) { 
+      gameData.state = "Ready to Start";
+      console.log(`[${SERVER_VERSION} SUBMITNAME] 4 players joined. Game state changed to 'Ready to Start'.`);
+    } else if (!gameData.gameStarted && numPlayers < 4) { // Ensure it's this if not enough
+        gameData.state = "Waiting for Players to Join";
     }
-    // We will add the specific 3 or 4 player check from your rules later
-    // if (!gameData.gameStarted && Object.keys(gameData.players).length === 4) { // Original 4-player check
-    //   gameData.state = "Ready to Start";
-    //   io.emit("gameState", gameData);
-    // }
+    io.emit("gameState", gameData); 
   });
-  // --- END OF submitName ---
+
+  socket.on("startGame", () => {
+    const playerName = getPlayerNameById(socket.id);
+    console.log(`[${SERVER_VERSION} STARTGAME] Request from ${playerName || 'Unknown Player'} (${socket.id}). Current state: ${gameData.state}`);
+
+    if (gameData.state !== "Ready to Start") {
+        return socket.emit("error", "Game not ready to start. Need 4 players and 'Ready to Start' state.");
+    }
+    if (Object.keys(gameData.players).length !== 4) { 
+        return socket.emit("error", "Need exactly 4 players to start this game configuration.");
+    }
+    
+    gameData.gameStarted = true;
+    gameData.playerSocketIds = shuffle([...gameData.playerSocketIds]); 
+    
+    const dealerSocketId = gameData.playerSocketIds[0];
+    gameData.dealer = gameData.players[dealerSocketId];
+    
+    gameData.playerOrderActive = [];
+    for (let i = 1; i <= 3; i++) {
+        const activePlayerSocketId = gameData.playerSocketIds[i % gameData.playerSocketIds.length]; 
+        gameData.playerOrderActive.push(gameData.players[activePlayerSocketId]);
+    }
+
+    initializeNewRoundState(); 
+    gameData.state = "Dealing Pending"; 
+    
+    console.log(`[${SERVER_VERSION} STARTGAME] Game started!`);
+    console.log(`   Table Order (Dealer first): ${gameData.playerSocketIds.map(id => gameData.players[id]).join(', ')}`);
+    console.log(`   Dealer: ${gameData.dealer}`);
+    console.log(`   Active Players for Round: ${gameData.playerOrderActive.join(', ')}`);
+    io.emit("gameState", gameData);
+  });
 
   socket.on("resetGame", () => { 
-    console.log("[SERVER (Step 3) RESETGAME] Full game reset requested.");
+    console.log(`[${SERVER_VERSION} RESETGAME] Full game reset requested.`);
     resetFullGameData(); 
     io.emit("gameState", gameData); 
   });
 
-  // --- ADDED: Full disconnect logic from full game ---
   socket.on("disconnect", (reason) => {
     const pName = gameData.players[socket.id];
-    console.log(`[SERVER (Step 3) DISCONNECT] ${pName || socket.id} disconnected. Reason: ${reason}`);
+    console.log(`[${SERVER_VERSION} DISCONNECT] ${pName || socket.id} disconnected. Reason: ${reason}`);
     if (pName) {
         delete gameData.players[socket.id];
         gameData.playerSocketIds = gameData.playerSocketIds.filter(id => id !== socket.id);
-        // Remove player from active order if they were in it
         gameData.playerOrderActive = gameData.playerOrderActive.filter(name => name !== pName);
         
-        // Simplified game reset on disconnect if critical number not met
-        // We will refine this later to match full game rules (e.g., pause vs reset)
         const numPlayers = Object.keys(gameData.players).length;
-        if (gameData.gameStarted && numPlayers < 3) { // Assuming min 3 for a game to continue
-            console.log("[SERVER (Step 3) DISCONNECT] Game was in progress, not enough players to continue. Resetting.");
-            resetFullGameData(); // Full reset for simplicity in this step
-        } else if (!gameData.gameStarted && gameData.state === "Ready to Start" && numPlayers < 3) { // If was ready but now not enough
+        if (gameData.gameStarted && numPlayers < 4) { // If game started and drops below 4
+            console.log(`[${SERVER_VERSION} DISCONNECT] Game was in progress, <4 players. Resetting.`);
+            resetFullGameData(); 
+        } else if (!gameData.gameStarted && gameData.state === "Ready to Start" && numPlayers < 4) { 
             gameData.state = "Waiting for Players to Join";
+        } else if (!gameData.gameStarted && numPlayers < 4) {
+            gameData.state = "Waiting for Players to Join"; // General fallback if not started
         }
         
         if (Object.keys(gameData.players).length === 0 && gameData.gameStarted) {
-            console.log("[SERVER (Step 3) DISCONNECT] Last player left. Resetting game data.");
+            console.log(`[${SERVER_VERSION} DISCONNECT] Last player left a started game. Resetting.`);
             resetFullGameData(); 
         }
-        io.emit("gameState", gameData); // Update all clients
+        io.emit("gameState", gameData); 
     }
   });
-  // --- END OF disconnect ---
 });
 
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
-  console.log(`Incremental Backend Server (Step 3) running on http://localhost:${PORT}`);
+  console.log(`Incremental Backend Server (${SERVER_VERSION}) running on http://localhost:${PORT}`);
 });
