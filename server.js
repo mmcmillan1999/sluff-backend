@@ -8,7 +8,7 @@ const cors =require("cors");
 const app = express();
 const server = http.createServer(app);
 
-const SERVER_VERSION = "2.1.3 - Scoring Logic Update"; // UPDATED SERVER VERSION
+const SERVER_VERSION = "2.1.4 - New Scoring Logic"; // UPDATED SERVER VERSION
 console.log(`INCREMENTAL SERVER (${SERVER_VERSION}): Initializing...`);
 
 const io = new Server(server, {
@@ -359,121 +359,87 @@ io.on("connection", (socket) => {
 
   function calculateRoundScores() {
     if (!gameData.bidWinnerInfo || gameData.tricksPlayedCount !== 11) {
-        console.error(`[${SERVER_VERSION} SCORING ERROR] Pre-requisite fail.`);
-        gameData.state = "Error - Scoring Failed PreRequisite";
-        io.emit("gameState", gameData); return;
+        gameData.state = "Error - Scoring PreRequisite"; io.emit("gameState", gameData); return;
     }
-    console.log(`[${SERVER_VERSION} SCORING] Starting. Bid Winner: ${gameData.bidWinnerInfo.playerName}, Last Trick by: ${gameData.trickLeaderName}`);
-
     const bidWinnerName = gameData.bidWinnerInfo.playerName;
     const bidType = gameData.bidWinnerInfo.bid;
     const bidMultiplier = {"Frog": 1, "Solo": 2, "Heart Solo": 3}[bidType];
     let bidderTotalCardPoints = 0;
-    let defendersTotalCardPoints = 0; // Sum of card points for all non-bidding active players
+    let defendersTotalCardPoints = 0;
     let awardedWidowInfo = { cards: [], points: 0, awardedTo: null };
 
-    // Assign widow points based on bid type
-    if (bidType === "Frog") { // Frog bidder's discards are their widow
-        awardedWidowInfo.cards = [...gameData.widow]; // gameData.widow was set to frog's discards
+    if (bidType === "Frog") {
+        awardedWidowInfo.cards = [...gameData.widow];
         awardedWidowInfo.points = calculateCardPoints(awardedWidowInfo.cards);
         bidderTotalCardPoints += awardedWidowInfo.points;
         awardedWidowInfo.awardedTo = bidWinnerName;
-    } else if (bidType === "Solo") { // Solo bidder automatically gets original widow
+    } else if (bidType === "Solo") {
         awardedWidowInfo.cards = [...gameData.originalDealtWidow];
         awardedWidowInfo.points = calculateCardPoints(awardedWidowInfo.cards);
         bidderTotalCardPoints += awardedWidowInfo.points;
         awardedWidowInfo.awardedTo = bidWinnerName;
-    } else if (bidType === "Heart Solo") { // Heart Solo widow goes to winner of last trick
+    } else if (bidType === "Heart Solo") {
         awardedWidowInfo.cards = [...gameData.originalDealtWidow];
         awardedWidowInfo.points = calculateCardPoints(awardedWidowInfo.cards);
         if (gameData.trickLeaderName === bidWinnerName) {
             bidderTotalCardPoints += awardedWidowInfo.points;
             awardedWidowInfo.awardedTo = bidWinnerName;
-        } else { // Award to the defender who won the last trick
+        } else {
             defendersTotalCardPoints += awardedWidowInfo.points;
-            awardedWidowInfo.awardedTo = gameData.trickLeaderName; // trickLeaderName is a defender here
+            awardedWidowInfo.awardedTo = gameData.trickLeaderName;
         }
     }
-
-    // Tally points from captured tricks
     Object.keys(gameData.capturedTricks).forEach(playerName => {
-        const tricksWonByPlayer = gameData.capturedTricks[playerName] || [];
-        let playerTrickPoints = 0;
-        tricksWonByPlayer.forEach(trickArray => playerTrickPoints += calculateCardPoints(trickArray));
-        if (playerName === bidWinnerName) {
-            bidderTotalCardPoints += playerTrickPoints;
-        } else if (gameData.playerOrderActive.includes(playerName)) { // Only count points from active opponents
-            defendersTotalCardPoints += playerTrickPoints;
-        }
+        const playerTrickPoints = (gameData.capturedTricks[playerName] || []).reduce((sum, trick) => sum + calculateCardPoints(trick), 0);
+        if (playerName === bidWinnerName) bidderTotalCardPoints += playerTrickPoints;
+        else if (gameData.playerOrderActive.includes(playerName)) defendersTotalCardPoints += playerTrickPoints;
     });
 
-    console.log(`[${SERVER_VERSION} SCORING] Bidder Total Card Pts (incl. widow portion): ${bidderTotalCardPoints}, Defenders Total Card Pts (incl. widow portion if applicable): ${defendersTotalCardPoints}`);
-    if (bidderTotalCardPoints + defendersTotalCardPoints !== 120) {
-        console.warn(`[${SERVER_VERSION} SCORING WARNING] Total card points accounted for (${bidderTotalCardPoints + defendersTotalCardPoints}) do not sum to 120!`);
-    }
+    console.log(`[${SERVER_VERSION} SCORING] Bidder Card Pts: ${bidderTotalCardPoints}, Defender Card Pts: ${defendersTotalCardPoints}`);
+    if (bidderTotalCardPoints + defendersTotalCardPoints !== 120) console.warn(`[${SERVER_VERSION} SCORING WARNING] Total card points (${bidderTotalCardPoints + defendersTotalCardPoints}) != 120!`);
 
     const targetPoints = 60;
-    let gamePointChangeForBidder = 0;
+    const scoreDifferenceFrom60 = bidderTotalCardPoints - targetPoints; // Can be negative, zero, or positive
+    const pointsDelta = Math.abs(scoreDifferenceFrom60); // Absolute difference from 60
+    const exchangeValuePerPlayer = pointsDelta * bidMultiplier;
+
     let roundMessage = "";
-    let bidMadeSuccessfully;
+    let bidMadeSuccessfully = bidderTotalCardPoints > targetPoints;
 
-    if (bidderTotalCardPoints === targetPoints) {
-        bidMadeSuccessfully = false; // Rule 7.2.A: Exactly 60 is a fail, no points exchanged.
-        gamePointChangeForBidder = 0;
+    if (scoreDifferenceFrom60 === 0) { // Exactly 60 points
+        bidMadeSuccessfully = false; // Considered a fail in terms of point exchange
         roundMessage = `${bidWinnerName} (Bid: ${bidType}) scored exactly 60. No game points exchanged.`;
-        // Scores remain unchanged for all players.
-    } else if (bidderTotalCardPoints > targetPoints) {
-        bidMadeSuccessfully = true; // Rule 7.2.B
-        const scoreDifference = bidderTotalCardPoints - targetPoints; // Positive value
-        const basePointsWonByBidder = scoreDifference * bidMultiplier;
-        
-        gamePointChangeForBidder = basePointsWonByBidder;
-        gameData.scores[bidWinnerName] = (gameData.scores[bidWinnerName] || 0) + gamePointChangeForBidder;
-
+        // No scores change for anyone.
+    } else if (bidderTotalCardPoints > targetPoints) { // Bidder succeeds (scores > 60)
+        bidMadeSuccessfully = true;
+        let totalPointsGainedByBidder = 0;
         const activeOpponents = gameData.playerOrderActive.filter(pName => pName !== bidWinnerName);
-        if (activeOpponents.length === 2) {
-            const loss1 = Math.floor(basePointsWonByBidder / 2);
-            const loss2 = basePointsWonByBidder - loss1; // Ensures total loss is exactly basePointsWonByBidder
-            gameData.scores[activeOpponents[0]] = (gameData.scores[activeOpponents[0]] || 0) - loss1;
-            gameData.scores[activeOpponents[1]] = (gameData.scores[activeOpponents[1]] || 0) - loss2;
-            roundMessage = `${bidWinnerName} (Bid: ${bidType}) succeeded! Gains ${gamePointChangeForBidder} pts. ${activeOpponents[0]} loses ${loss1}, ${activeOpponents[1]} loses ${loss2}.`;
-        } else { // Fallback for unexpected opponent count, though rules imply 2 active opponents
-            let totalLossDistributed = 0;
-            activeOpponents.forEach(oppName => {
-                const lossShare = Math.round(basePointsWonByBidder / activeOpponents.length); // Simple division
-                gameData.scores[oppName] = (gameData.scores[oppName] || 0) - lossShare;
-                totalLossDistributed += lossShare;
-            });
-             // Adjust bidder's gain if rounding caused mismatch, though ideally sum should be zero
-            if (totalLossDistributed !== basePointsWonByBidder) {
-                console.warn(`[${SERVER_VERSION} SCORING] Discrepancy in distributing loss for successful bid. Bidder gained ${basePointsWonByBidder}, Opponents lost ${totalLossDistributed}`);
-                 // For now, bidder keeps their calculated gain.
-            }
-            roundMessage = `${bidWinnerName} (Bid: ${bidType}) succeeded! Gains ${gamePointChangeForBidder} pts. Opponents collectively lose ${totalLossDistributed}.`;
-        }
-    } else { // Bidder Fails (P_bidder < 60 points) - Rule 7.2.C
+        
+        activeOpponents.forEach(oppName => {
+            gameData.scores[oppName] = (gameData.scores[oppName] || 0) - exchangeValuePerPlayer;
+            totalPointsGainedByBidder += exchangeValuePerPlayer;
+        });
+        gameData.scores[bidWinnerName] = (gameData.scores[bidWinnerName] || 0) + totalPointsGainedByBidder;
+        roundMessage = `${bidWinnerName} (Bid: ${bidType}) succeeded! Gains ${totalPointsGainedByBidder} pts (receives ${exchangeValuePerPlayer} from each active opponent).`;
+    } else { // Bidder fails (scores < 60)
         bidMadeSuccessfully = false;
-        const scoreDifference = bidderTotalCardPoints - targetPoints; // Negative value, e.g., 59 - 60 = -1
-        const basePointsOwed = Math.abs(scoreDifference) * bidMultiplier; // e.g., abs(-1) * 2 (Solo) = 2
-
         let totalPointsLostByBidder = 0;
+        
         gameData.playerOrderActive.forEach(pName => { // Active opponents gain
             if (pName !== bidWinnerName) {
-                gameData.scores[pName] = (gameData.scores[pName] || 0) + basePointsOwed;
-                totalPointsLostByBidder += basePointsOwed;
+                gameData.scores[pName] = (gameData.scores[pName] || 0) + exchangeValuePerPlayer;
+                totalPointsLostByBidder += exchangeValuePerPlayer;
             }
         });
-
         if (gameData.playerSocketIds.length === 4 && gameData.dealer) { // Inactive dealer also gains
             const dealerNameActual = getPlayerNameById(gameData.dealer);
             if (dealerNameActual && dealerNameActual !== bidWinnerName && !gameData.playerOrderActive.includes(dealerNameActual)) {
-                gameData.scores[dealerNameActual] = (gameData.scores[dealerNameActual] || 0) + basePointsOwed;
-                totalPointsLostByBidder += basePointsOwed;
+                gameData.scores[dealerNameActual] = (gameData.scores[dealerNameActual] || 0) + exchangeValuePerPlayer;
+                totalPointsLostByBidder += exchangeValuePerPlayer;
             }
         }
         gameData.scores[bidWinnerName] = (gameData.scores[bidWinnerName] || 0) - totalPointsLostByBidder;
-        gamePointChangeForBidder = -totalPointsLostByBidder;
-        roundMessage = `${bidWinnerName} (Bid: ${bidType}) failed. Loses ${totalPointsLostByBidder} pts. Each recipient gains ${basePointsOwed} pts.`;
+        roundMessage = `${bidWinnerName} (Bid: ${bidType}) failed. Loses ${totalPointsLostByBidder} pts (pays ${exchangeValuePerPlayer} to each recipient).`;
     }
 
     let isGameOver = false;
@@ -498,20 +464,14 @@ io.on("connection", (socket) => {
         dealerOfRound: gameData.dealer
     };
     console.log(`[${SERVER_VERSION} SCORING] Round Summary:`, gameData.roundSummary);
-    console.log(`[${SERVER_VERSION} SCORING] Final scores this round:`, JSON.stringify(gameData.scores));
-    const totalGameScore = Object.values(gameData.scores).reduce((sum, score) => sum + score, 0);
-    console.log(`[${SERVER_VERSION} SCORING] Sum of all player scores: ${totalGameScore} (Should be 480 for 4 players, 360 for 3 players if starting at 120 each)`);
+    const totalGameScore = Object.values(gameData.scores).reduce((sum, score) => sum + (score || 0), 0); // Ensure score is not undefined
+    console.log(`[${SERVER_VERSION} SCORING] Sum of all player scores: ${totalGameScore}`);
 
-
-    if (!isGameOver) {
-        gameData.state = "Awaiting Next Round Trigger";
-        console.log(`[${SERVER_VERSION} SCORING] Game not over. State set to 'Awaiting Next Round Trigger'.`);
-    }
+    if (!isGameOver) gameData.state = "Awaiting Next Round Trigger";
     io.emit("gameState", gameData);
   }
 
   function prepareNextRound() {
-    console.log(`[${SERVER_VERSION}] Preparing for next round. Last round's Dealer was: ${getPlayerNameById(gameData.dealer)}`);
     const numTotalPlayers = gameData.playerSocketIds.length;
     if (numTotalPlayers < 3 || numTotalPlayers > 4) {
         gameData.state = "Error - Player Count Issue"; io.emit("gameState", gameData); return;
@@ -557,7 +517,7 @@ io.on("connection", (socket) => {
   socket.on("resetGame", () => { resetFullGameData(); io.emit("gameState", gameData); });
 
   socket.on("disconnect", (reason) => {
-    const pName = gameData.players[socket.id];
+    const pName = getPlayerNameById(socket.id);
     if (pName) {
         const wasDealer = gameData.dealer === socket.id || (gameData.roundSummary && gameData.roundSummary.dealerOfRound === socket.id);
         delete gameData.players[socket.id];
@@ -566,7 +526,7 @@ io.on("connection", (socket) => {
         const numPlayers = Object.keys(gameData.players).length;
         if (gameData.gameStarted && numPlayers < 3) resetFullGameData();
         else if (gameData.gameStarted && wasDealer && gameData.state === "Awaiting Next Round Trigger") {
-             console.log(`[${SERVER_VERSION} DISCONNECT] Dealer ${pName} disconnected while Awaiting Next Round Trigger. Game may stall.`);
+             console.log(`[${SERVER_VERSION} DISCONNECT] Dealer ${pName} disconnected while Awaiting Next Round Trigger.`);
         } else if (gameData.gameStarted && (gameData.biddingTurnPlayerName === pName || gameData.trickTurnPlayerName === pName)) {
             resetFullGameData();
         } else if (!gameData.gameStarted && numPlayers < 4) gameData.state = "Waiting for Players to Join";
