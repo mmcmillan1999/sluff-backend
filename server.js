@@ -8,7 +8,7 @@ const cors =require("cors");
 const app = express();
 const server = http.createServer(app);
 
-const SERVER_VERSION = "2.1.4 - New Scoring Logic"; // UPDATED SERVER VERSION
+const SERVER_VERSION = "2.1.5 - Store Last Trick"; // UPDATED SERVER VERSION
 console.log(`INCREMENTAL SERVER (${SERVER_VERSION}): Initializing...`);
 
 const io = new Server(server, {
@@ -53,7 +53,8 @@ let gameData = {
   trumpSuit: null, bidWinnerInfo: null, gameStarted: false, currentTrickCards: [],
   trickTurnPlayerName: null, tricksPlayedCount: 0, leadSuitCurrentTrick: null,
   trumpBroken: false, trickLeaderName: null, capturedTricks: {}, roundSummary: null,
-  revealedWidowForFrog: []
+  revealedWidowForFrog: [],
+  lastCompletedTrick: null // ADDED: To store details of the last played trick
 };
 console.log(`INCREMENTAL SERVER (${SERVER_VERSION}): Initial gameData structure defined.`);
 
@@ -87,10 +88,12 @@ function initializeNewRoundState() {
     gameData.bidsMadeCount = 0; gameData.originalFrogBidderId = null;
     gameData.soloBidMadeAfterFrog = false; gameData.currentTrickCards = [];
     gameData.trickTurnPlayerName = null; gameData.tricksPlayedCount = 0;
-    gameData.leadSuitCurrentTrick = null; gameData.trumpBroken = false;
+    gameData.leadSuitCurrentTrick = null;
+    gameData.trumpBroken = false;
     gameData.trickLeaderName = null; gameData.capturedTricks = {};
     gameData.roundSummary = null;
     gameData.revealedWidowForFrog = [];
+    gameData.lastCompletedTrick = null; // Reset last completed trick
     Object.values(gameData.players).forEach(pName => {
         if(pName && gameData.scores[pName] !== undefined) gameData.capturedTricks[pName] = [];
     });
@@ -107,7 +110,8 @@ function resetFullGameData() {
         trumpSuit: null, bidWinnerInfo: null, gameStarted: false, currentTrickCards: [],
         trickTurnPlayerName: null, tricksPlayedCount: 0, leadSuitCurrentTrick: null,
         trumpBroken: false, trickLeaderName: null, capturedTricks: {}, roundSummary: null,
-        revealedWidowForFrog: []
+        revealedWidowForFrog: [],
+        lastCompletedTrick: null // Reset in full game reset
     };
 }
 
@@ -141,6 +145,7 @@ function transitionToPlayingPhase() {
     gameData.trumpBroken = false;
     gameData.currentTrickCards = [];
     gameData.leadSuitCurrentTrick = null;
+    gameData.lastCompletedTrick = null; // Clear last completed trick when starting play phase
     if (gameData.bidWinnerInfo && gameData.bidWinnerInfo.playerName) {
         gameData.trickLeaderName = gameData.bidWinnerInfo.playerName;
         gameData.trickTurnPlayerName = gameData.bidWinnerInfo.playerName;
@@ -206,6 +211,7 @@ io.on("connection", (socket) => {
     gameData.bidsMadeCount = 0; gameData.bidsThisRound = []; gameData.currentHighestBidDetails = null;
     gameData.biddingTurnPlayerName = gameData.playerOrderActive[0];
     gameData.roundSummary = null;
+    gameData.lastCompletedTrick = null; // Clear at start of new deal
     io.emit("gameState", gameData);
   });
 
@@ -229,6 +235,7 @@ io.on("connection", (socket) => {
   function resolveBiddingFinal() {
     if (!gameData.currentHighestBidDetails) {
         gameData.state = "Round Skipped"; gameData.revealedWidowForFrog = [];
+        gameData.lastCompletedTrick = null; // Clear if round is skipped
         setTimeout(() => { if (gameData.state === "Round Skipped") prepareNextRound(); }, 5000);
     } else {
       gameData.bidWinnerInfo = { ...gameData.currentHighestBidDetails };
@@ -330,6 +337,13 @@ io.on("connection", (socket) => {
     if (!pName || gameData.state !== "Playing Phase" || pName !== gameData.trickTurnPlayerName) return socket.emit("error", "Invalid play action.");
     const hand = gameData.hands[pName];
     if (!hand || !hand.includes(card)) return socket.emit("error", "Card not in hand.");
+
+    // Clear lastCompletedTrick when a new card is played to start a new current trick
+    if (gameData.currentTrickCards.length === 0) {
+        // gameData.lastCompletedTrick = null; // Option 1: Clear when new trick *starts*
+                                            // Option 2 (current): Overwrite when trick *ends*
+    }
+
     const isLeading = gameData.currentTrickCards.length === 0;
     const playedSuit = getSuit(card);
     if (isLeading) {
@@ -343,14 +357,33 @@ io.on("connection", (socket) => {
     gameData.currentTrickCards.push({ playerId: socket.id, playerName: pName, card });
     if (isLeading) gameData.leadSuitCurrentTrick = playedSuit;
     if (playedSuit === gameData.trumpSuit && !gameData.trumpBroken) gameData.trumpBroken = true;
-    if (gameData.currentTrickCards.length === gameData.playerOrderActive.length) {
+
+    if (gameData.currentTrickCards.length === gameData.playerOrderActive.length) { // Trick is complete
       const winnerName = determineTrickWinner(gameData.currentTrickCards, gameData.leadSuitCurrentTrick, gameData.trumpSuit);
       if (winnerName && gameData.capturedTricks[winnerName]) gameData.capturedTricks[winnerName].push([...gameData.currentTrickCards.map(p => p.card)]);
       else if (winnerName) gameData.capturedTricks[winnerName] = [[...gameData.currentTrickCards.map(p => p.card)]];
-      gameData.tricksPlayedCount++; gameData.trickLeaderName = winnerName;
-      if (gameData.tricksPlayedCount === 11) calculateRoundScores();
-      else { gameData.currentTrickCards = []; gameData.leadSuitCurrentTrick = null; gameData.trickTurnPlayerName = winnerName; io.emit("gameState", gameData); }
-    } else {
+
+      // Store details of the just-completed trick
+      gameData.lastCompletedTrick = {
+          cards: [...gameData.currentTrickCards], // Store a copy
+          winnerName: winnerName,
+          leadSuit: gameData.leadSuitCurrentTrick, // Store lead suit for context
+          trickNumber: gameData.tricksPlayedCount + 1 // Number of the trick that just finished
+      };
+
+      gameData.tricksPlayedCount++;
+      gameData.trickLeaderName = winnerName;
+      console.log(`[${SERVER_VERSION}] Trick ${gameData.tricksPlayedCount} won by ${winnerName}. Stored as lastCompletedTrick.`);
+
+      if (gameData.tricksPlayedCount === 11) { // All tricks played for the round
+        calculateRoundScores(); // This will emit gameState
+      } else { // Prepare for next trick
+          gameData.currentTrickCards = [];
+          gameData.leadSuitCurrentTrick = null;
+          gameData.trickTurnPlayerName = winnerName;
+          io.emit("gameState", gameData);
+      }
+    } else { // Trick not yet complete, advance turn
       const currentIdxInActiveOrder = gameData.playerOrderActive.indexOf(pName);
       gameData.trickTurnPlayerName = gameData.playerOrderActive[(currentIdxInActiveOrder + 1) % gameData.playerOrderActive.length];
       io.emit("gameState", gameData);
@@ -381,7 +414,7 @@ io.on("connection", (socket) => {
     } else if (bidType === "Heart Solo") {
         awardedWidowInfo.cards = [...gameData.originalDealtWidow];
         awardedWidowInfo.points = calculateCardPoints(awardedWidowInfo.cards);
-        if (gameData.trickLeaderName === bidWinnerName) {
+        if (gameData.trickLeaderName === bidWinnerName) { // trickLeaderName is winner of 11th trick
             bidderTotalCardPoints += awardedWidowInfo.points;
             awardedWidowInfo.awardedTo = bidWinnerName;
         } else {
@@ -399,39 +432,35 @@ io.on("connection", (socket) => {
     if (bidderTotalCardPoints + defendersTotalCardPoints !== 120) console.warn(`[${SERVER_VERSION} SCORING WARNING] Total card points (${bidderTotalCardPoints + defendersTotalCardPoints}) != 120!`);
 
     const targetPoints = 60;
-    const scoreDifferenceFrom60 = bidderTotalCardPoints - targetPoints; // Can be negative, zero, or positive
-    const pointsDelta = Math.abs(scoreDifferenceFrom60); // Absolute difference from 60
+    const scoreDifferenceFrom60 = bidderTotalCardPoints - targetPoints;
+    const pointsDelta = Math.abs(scoreDifferenceFrom60);
     const exchangeValuePerPlayer = pointsDelta * bidMultiplier;
-
     let roundMessage = "";
     let bidMadeSuccessfully = bidderTotalCardPoints > targetPoints;
 
-    if (scoreDifferenceFrom60 === 0) { // Exactly 60 points
-        bidMadeSuccessfully = false; // Considered a fail in terms of point exchange
+    if (scoreDifferenceFrom60 === 0) {
+        bidMadeSuccessfully = false;
         roundMessage = `${bidWinnerName} (Bid: ${bidType}) scored exactly 60. No game points exchanged.`;
-        // No scores change for anyone.
-    } else if (bidderTotalCardPoints > targetPoints) { // Bidder succeeds (scores > 60)
+    } else if (bidderTotalCardPoints > targetPoints) {
         bidMadeSuccessfully = true;
         let totalPointsGainedByBidder = 0;
         const activeOpponents = gameData.playerOrderActive.filter(pName => pName !== bidWinnerName);
-        
         activeOpponents.forEach(oppName => {
             gameData.scores[oppName] = (gameData.scores[oppName] || 0) - exchangeValuePerPlayer;
             totalPointsGainedByBidder += exchangeValuePerPlayer;
         });
         gameData.scores[bidWinnerName] = (gameData.scores[bidWinnerName] || 0) + totalPointsGainedByBidder;
         roundMessage = `${bidWinnerName} (Bid: ${bidType}) succeeded! Gains ${totalPointsGainedByBidder} pts (receives ${exchangeValuePerPlayer} from each active opponent).`;
-    } else { // Bidder fails (scores < 60)
+    } else {
         bidMadeSuccessfully = false;
         let totalPointsLostByBidder = 0;
-        
-        gameData.playerOrderActive.forEach(pName => { // Active opponents gain
+        gameData.playerOrderActive.forEach(pName => {
             if (pName !== bidWinnerName) {
                 gameData.scores[pName] = (gameData.scores[pName] || 0) + exchangeValuePerPlayer;
                 totalPointsLostByBidder += exchangeValuePerPlayer;
             }
         });
-        if (gameData.playerSocketIds.length === 4 && gameData.dealer) { // Inactive dealer also gains
+        if (gameData.playerSocketIds.length === 4 && gameData.dealer) {
             const dealerNameActual = getPlayerNameById(gameData.dealer);
             if (dealerNameActual && dealerNameActual !== bidWinnerName && !gameData.playerOrderActive.includes(dealerNameActual)) {
                 gameData.scores[dealerNameActual] = (gameData.scores[dealerNameActual] || 0) + exchangeValuePerPlayer;
@@ -463,12 +492,11 @@ io.on("connection", (socket) => {
         isGameOver, gameWinner, message: roundMessage,
         dealerOfRound: gameData.dealer
     };
-    console.log(`[${SERVER_VERSION} SCORING] Round Summary:`, gameData.roundSummary);
-    const totalGameScore = Object.values(gameData.scores).reduce((sum, score) => sum + (score || 0), 0); // Ensure score is not undefined
-    console.log(`[${SERVER_VERSION} SCORING] Sum of all player scores: ${totalGameScore}`);
+    const totalGameScore = Object.values(gameData.scores).reduce((sum, score) => sum + (score || 0), 0);
+    console.log(`[${SERVER_VERSION} SCORING] Round Summary generated. Sum of all player scores: ${totalGameScore}`);
 
     if (!isGameOver) gameData.state = "Awaiting Next Round Trigger";
-    io.emit("gameState", gameData);
+    io.emit("gameState", gameData); // This now includes lastCompletedTrick from the 11th trick
   }
 
   function prepareNextRound() {
@@ -496,20 +524,19 @@ io.on("connection", (socket) => {
             if (gameData.players[activePlayerSocketId]) gameData.playerOrderActive.push(gameData.players[activePlayerSocketId]);
         }
     }
-    initializeNewRoundState();
+    initializeNewRoundState(); // This will set lastCompletedTrick to null
     gameData.state = "Dealing Pending";
     io.emit("gameState", gameData);
   }
 
   socket.on("requestNextRound", () => {
-    const playerName = getPlayerNameById(socket.id);
     if (gameData.state === "Awaiting Next Round Trigger" && gameData.roundSummary && socket.id === gameData.roundSummary.dealerOfRound) {
         prepareNextRound();
     } else {
         let reason = "Not correct state or not authorized.";
-        if (gameData.state !== "Awaiting Next Round Trigger") reason = "Not in 'Awaiting Next Round Trigger' state.";
+        if (gameData.state !== "Awaiting Next Round Trigger") reason = "Not 'Awaiting Next Round Trigger' state.";
         else if (!gameData.roundSummary) reason = "Round summary not available.";
-        else if (socket.id !== gameData.roundSummary.dealerOfRound) reason = "Only the dealer of the last round can start the next round.";
+        else if (socket.id !== gameData.roundSummary.dealerOfRound) reason = "Only dealer of last round can start next round.";
         socket.emit("error", `Cannot start next round: ${reason}`);
     }
   });
