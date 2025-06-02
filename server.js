@@ -8,7 +8,7 @@ const cors =require("cors");
 const app = express();
 const server = http.createServer(app);
 
-const SERVER_VERSION = "2.2.0 - Boot All & Consolidated"; // UPDATED SERVER VERSION
+const SERVER_VERSION = "2.2.1 - Bidding Pass Rule"; // UPDATED SERVER VERSION
 console.log(`INCREMENTAL SERVER (${SERVER_VERSION}): Initializing...`);
 
 const io = new Server(server, {
@@ -54,7 +54,8 @@ let gameData = {
   trickTurnPlayerName: null, tricksPlayedCount: 0, leadSuitCurrentTrick: null,
   trumpBroken: false, trickLeaderName: null, capturedTricks: {}, roundSummary: null,
   revealedWidowForFrog: [],
-  lastCompletedTrick: null
+  lastCompletedTrick: null,
+  playersWhoPassedThisRound: [] // ADDED: Track players who passed this bidding round
 };
 console.log(`INCREMENTAL SERVER (${SERVER_VERSION}): Initial gameData structure defined.`);
 
@@ -94,6 +95,7 @@ function initializeNewRoundState() {
     gameData.roundSummary = null;
     gameData.revealedWidowForFrog = [];
     gameData.lastCompletedTrick = null;
+    gameData.playersWhoPassedThisRound = []; // MODIFIED: Reset for new round
     Object.values(gameData.players).forEach(pName => {
         if(pName && gameData.players && gameData.scores && gameData.scores[pName] !== undefined) gameData.capturedTricks[pName] = [];
     });
@@ -111,7 +113,8 @@ function resetFullGameData() {
         trickTurnPlayerName: null, tricksPlayedCount: 0, leadSuitCurrentTrick: null,
         trumpBroken: false, trickLeaderName: null, capturedTricks: {}, roundSummary: null,
         revealedWidowForFrog: [],
-        lastCompletedTrick: null
+        lastCompletedTrick: null,
+        playersWhoPassedThisRound: [] // MODIFIED: Ensure reset here
     };
     console.log(`[${SERVER_VERSION}] Game data fully reset.`);
 }
@@ -193,7 +196,7 @@ io.on("connection", (socket) => {
         const activePlayerSocketId = gameData.playerSocketIds[(gameData.playerSocketIds.indexOf(gameData.dealer) + i) % gameData.playerSocketIds.length];
         gameData.playerOrderActive.push(gameData.players[activePlayerSocketId]);
     }
-    initializeNewRoundState();
+    initializeNewRoundState(); // This now resets playersWhoPassedThisRound
     gameData.state = "Dealing Pending";
     io.emit("gameState", gameData);
   });
@@ -213,6 +216,7 @@ io.on("connection", (socket) => {
     gameData.biddingTurnPlayerName = gameData.playerOrderActive[0];
     gameData.roundSummary = null;
     gameData.lastCompletedTrick = null;
+    gameData.playersWhoPassedThisRound = []; // MODIFIED: Initialize for the new bidding round
     io.emit("gameState", gameData);
   });
 
@@ -257,48 +261,119 @@ io.on("connection", (socket) => {
   socket.on("placeBid", ({ bid }) => {
     const pName = getPlayerNameById(socket.id);
     if (!pName) return socket.emit("error", "Player not found.");
+
     if (gameData.state === "Awaiting Frog Upgrade Decision") {
-        if (socket.id !== gameData.originalFrogBidderId || (bid !== "Heart Solo" && bid !== "Pass")) return socket.emit("error", "Invalid frog upgrade.");
+        if (socket.id !== gameData.originalFrogBidderId || (bid !== "Heart Solo" && bid !== "Pass")) {
+            return socket.emit("error", "Invalid frog upgrade bid/pass.");
+        }
         gameData.bidsThisRound.push({ playerId: socket.id, playerName: pName, bidType: "FrogUpgradeDecision", bidValue: bid });
-        if (bid === "Heart Solo") gameData.currentHighestBidDetails = { playerId: socket.id, playerName: pName, bid: "Heart Solo" };
-        gameData.bidsMadeCount = 0; gameData.biddingTurnPlayerName = null;
-        resolveBiddingFinal(); return;
+        if (bid === "Heart Solo") {
+            gameData.currentHighestBidDetails = { playerId: socket.id, playerName: pName, bid: "Heart Solo" };
+        }
+        gameData.bidsMadeCount = 0;
+        gameData.biddingTurnPlayerName = null;
+        resolveBiddingFinal();
+        return;
     }
-    if (gameData.state !== "Bidding Phase" || pName !== gameData.biddingTurnPlayerName || !BID_HIERARCHY.includes(bid)) return socket.emit("error", "Invalid bid action.");
+
+    if (gameData.state !== "Bidding Phase") return socket.emit("error", "Not in Bidding Phase.");
+    if (pName !== gameData.biddingTurnPlayerName) return socket.emit("error", "Not your turn to bid.");
+    if (!BID_HIERARCHY.includes(bid)) return socket.emit("error", "Invalid bid type.");
+
+    // MODIFIED: Check if player has already passed this round
+    if (gameData.playersWhoPassedThisRound.includes(pName)) {
+        return socket.emit("error", "You have already passed and cannot bid again this round.");
+    }
+
     const currentHighestBidIndex = gameData.currentHighestBidDetails ? BID_HIERARCHY.indexOf(gameData.currentHighestBidDetails.bid) : -1;
-    if (bid !== "Pass" && BID_HIERARCHY.indexOf(bid) <= currentHighestBidIndex) return socket.emit("error", "Bid not high enough.");
+    if (bid !== "Pass" && BID_HIERARCHY.indexOf(bid) <= currentHighestBidIndex) {
+        return socket.emit("error", "Bid is not higher than current highest bid.");
+    }
+
     gameData.bidsThisRound.push({ playerId: socket.id, playerName: pName, bidType: "RegularBid", bidValue: bid });
+
     if (bid !== "Pass") {
       gameData.currentHighestBidDetails = { playerId: socket.id, playerName: pName, bid };
-      if (pName === gameData.playerOrderActive[0] && bid === "Frog" && !gameData.originalFrogBidderId) gameData.originalFrogBidderId = socket.id;
-      else if (gameData.originalFrogBidderId && bid === "Solo" && socket.id !== gameData.originalFrogBidderId) gameData.soloBidMadeAfterFrog = true;
+      if (pName === gameData.playerOrderActive[0] && bid === "Frog" && !gameData.originalFrogBidderId) {
+          gameData.originalFrogBidderId = socket.id;
+      } else if (gameData.originalFrogBidderId && bid === "Solo" && socket.id !== gameData.originalFrogBidderId) {
+          gameData.soloBidMadeAfterFrog = true;
+      }
+    } else { // Player chose to Pass
+        if (!gameData.playersWhoPassedThisRound.includes(pName)) {
+            gameData.playersWhoPassedThisRound.push(pName);
+        }
     }
-    gameData.bidsMadeCount++;
-    if (gameData.bidsMadeCount >= gameData.playerOrderActive.length) {
-      const nonPassBids = gameData.bidsThisRound.filter(b => b.bidValue !== "Pass" && b.bidType === "RegularBid");
-      const lastRealBidIndex = nonPassBids.length > 0 ? gameData.bidsThisRound.lastIndexOf(nonPassBids[nonPassBids.length - 1]) : -1;
-      let passesToConsider = (lastRealBidIndex !== -1) ? gameData.bidsThisRound.slice(lastRealBidIndex + 1) : gameData.bidsThisRound;
-      const passesSinceLastRealBidOrStart = passesToConsider.filter(b => b.bidValue === "Pass" && b.bidType === "RegularBid").length;
-      if ( (gameData.currentHighestBidDetails && passesSinceLastRealBidOrStart >= (gameData.playerOrderActive.length - 1) ) ||
-           (!gameData.currentHighestBidDetails && gameData.bidsMadeCount === gameData.playerOrderActive.length) ) {
-        gameData.biddingTurnPlayerName = null; gameData.bidsMadeCount = 0; checkForFrogUpgrade();
-      } else {
+    // MODIFIED: BidsMadeCount is not used for primary end-of-bidding logic anymore.
+    // gameData.bidsMadeCount++;
+
+    const nonPassBidsInCurrentSequence = gameData.bidsThisRound.filter(b => b.bidValue !== "Pass" && b.bidType === "RegularBid");
+    const lastActualBid = nonPassBidsInCurrentSequence.length > 0 ? nonPassBidsInCurrentSequence[nonPassBidsInCurrentSequence.length -1] : null;
+
+    let passesSinceLastActualBid = 0;
+    if (lastActualBid) {
+        const indexOfLastActualBid = gameData.bidsThisRound.lastIndexOf(lastActualBid);
+        passesSinceLastActualBid = gameData.bidsThisRound.slice(indexOfLastActualBid + 1)
+                                    .filter(b => b.bidValue === "Pass" && b.bidType === "RegularBid").length;
+    } else {
+        passesSinceLastActualBid = gameData.bidsThisRound.filter(b => b.bidValue === "Pass" && b.bidType === "RegularBid").length;
+    }
+
+    const activeBiddersRemaining = gameData.playerOrderActive.filter(playerName => !gameData.playersWhoPassedThisRound.includes(playerName));
+    
+    // Bidding ends if only one active bidder remains who hasn't passed for the round, and they made the last actual bid,
+    // OR if all active players have passed for the round.
+    // OR if there's an actual bid and all other active players (who haven't passed for the round) have now passed on this bid.
+    let endBidding = false;
+    if (!lastActualBid && gameData.playersWhoPassedThisRound.length === gameData.playerOrderActive.length) {
+        endBidding = true; // All passed initially
+    } else if (lastActualBid) {
+        if (activeBiddersRemaining.length === 1 && activeBiddersRemaining[0] === lastActualBid.playerName) {
+            endBidding = true; // Only the last bidder remains eligible
+        } else if (activeBiddersRemaining.length > 1) {
+            // Count how many of the *currently eligible* active bidders (excluding the one who just bid, if they made an actual bid)
+            // have passed *since* the lastActualBid.
+            const playersToCheckForPass = activeBiddersRemaining.filter(bidder => bidder !== lastActualBid.playerName);
+            let subsequentPasses = 0;
+            const indexOfLastActualBid = gameData.bidsThisRound.lastIndexOf(lastActualBid);
+
+            for(let i = indexOfLastActualBid + 1; i < gameData.bidsThisRound.length; i++) {
+                if (gameData.bidsThisRound[i].bidType === "RegularBid" && gameData.bidsThisRound[i].bidValue === "Pass" && playersToCheckForPass.includes(gameData.bidsThisRound[i].playerName)) {
+                    subsequentPasses++;
+                }
+            }
+            if (subsequentPasses >= playersToCheckForPass.length) {
+                endBidding = true;
+            }
+        } else if (activeBiddersRemaining.length === 0 && gameData.playersWhoPassedThisRound.length === gameData.playerOrderActive.length) {
+             endBidding = true; // All passed
+        }
+    }
+
+
+    if (endBidding) {
+        gameData.biddingTurnPlayerName = null;
+        checkForFrogUpgrade();
+    } else {
         let currentBidderIndexInActiveOrder = gameData.playerOrderActive.indexOf(pName);
         let nextBidderName = null;
         for (let i = 1; i < gameData.playerOrderActive.length; i++) {
             let nextIndex = (currentBidderIndexInActiveOrder + i) % gameData.playerOrderActive.length;
             let potentialNextBidder = gameData.playerOrderActive[nextIndex];
-            const hasPassedThisRoundAfterCurrentHighest = gameData.bidsThisRound.find(b => b.playerName === potentialNextBidder && b.bidValue === "Pass" && b.bidType === "RegularBid" && (lastRealBidIndex === -1 || gameData.bidsThisRound.indexOf(b) > lastRealBidIndex) );
-            if (!hasPassedThisRoundAfterCurrentHighest) { nextBidderName = potentialNextBidder; break; }
+            if (!gameData.playersWhoPassedThisRound.includes(potentialNextBidder)) {
+                nextBidderName = potentialNextBidder;
+                break;
+            }
         }
-        if (nextBidderName) gameData.biddingTurnPlayerName = nextBidderName;
-        else { gameData.biddingTurnPlayerName = null; gameData.bidsMadeCount = 0; checkForFrogUpgrade(); return; }
+        if (nextBidderName) {
+            gameData.biddingTurnPlayerName = nextBidderName;
+        } else {
+            console.log(`[${SERVER_VERSION} PLACEBID] Fallback: No eligible next bidder found. Checking for frog upgrade.`);
+            gameData.biddingTurnPlayerName = null;
+            checkForFrogUpgrade();
+            return;
+        }
         io.emit("gameState", gameData);
-      }
-    } else {
-      const currentBidderIndexInActiveOrder = gameData.playerOrderActive.indexOf(pName);
-      gameData.biddingTurnPlayerName = gameData.playerOrderActive[(currentBidderIndexInActiveOrder + 1) % gameData.playerOrderActive.length];
-      io.emit("gameState", gameData);
     }
   });
 
@@ -515,7 +590,7 @@ io.on("connection", (socket) => {
             if (gameData.players[activePlayerSocketId]) gameData.playerOrderActive.push(gameData.players[activePlayerSocketId]);
         }
     }
-    initializeNewRoundState();
+    initializeNewRoundState(); // This now resets playersWhoPassedThisRound
     gameData.state = "Dealing Pending";
     io.emit("gameState", gameData);
   }
