@@ -8,7 +8,7 @@ const cors =require("cors");
 const app = express();
 const server = http.createServer(app);
 
-const SERVER_VERSION = "3.0.0 - 3-Player Mode"; // UPDATED SERVER VERSION
+const SERVER_VERSION = "3.0.1 - Trick Linger Logic"; // UPDATED SERVER VERSION
 console.log(`INCREMENTAL SERVER (${SERVER_VERSION}): Initializing...`);
 
 const io = new Server(server, {
@@ -35,7 +35,7 @@ const SUITS = { H: "Hearts", D: "Diamonds", C: "Clubs", S: "Spades" };
 const RANKS_ORDER = ["6", "7", "8", "9", "J", "Q", "K", "10", "A"];
 const CARD_POINT_VALUES = { "A": 11, "10": 10, "K": 4, "Q": 3, "J": 2, "9":0, "8":0, "7":0, "6":0 };
 const BID_HIERARCHY = ["Pass", "Frog", "Solo", "Heart Solo"];
-const PLACEHOLDER_ID = "ScoreAbsorber"; // ADDED: Placeholder ID for 3-player mode scoring
+const PLACEHOLDER_ID = "ScoreAbsorber"; 
 
 let deck = [];
 for (const suitKey in SUITS) {
@@ -47,7 +47,7 @@ console.log(`INCREMENTAL SERVER (${SERVER_VERSION}): Constants and Deck initiali
 
 let gameData = {
   state: "Waiting for Players to Join", players: {}, playerSocketIds: [],
-  playerOrderActive: [], dealer: null, // dealer is a socketId
+  playerOrderActive: [], dealer: null, 
   hands: {}, widow: [], originalDealtWidow: [],
   widowDiscardsForFrogBidder: [], scores: {}, bidsThisRound: [], currentHighestBidDetails: null,
   biddingTurnPlayerName: null, bidsMadeCount: 0, originalFrogBidderId: null, soloBidMadeAfterFrog: false,
@@ -57,7 +57,8 @@ let gameData = {
   revealedWidowForFrog: [],
   lastCompletedTrick: null,
   playersWhoPassedThisRound: [],
-  playerMode: null // ADDED: To distinguish between 3-player and 4-player mode (3 or 4)
+  playerMode: null,
+  serverVersion: SERVER_VERSION // Added for client display
 };
 console.log(`INCREMENTAL SERVER (${SERVER_VERSION}): Initial gameData structure defined.`);
 
@@ -84,8 +85,6 @@ function calculateCardPoints(cardsArray) {
 }
 
 function initializeNewRoundState() {
-    // Note: playerMode and ScoreAbsorber's score should persist across rounds within a game.
-    // They are only reset during a full game reset.
     gameData.hands = {}; gameData.widow = []; gameData.originalDealtWidow = [];
     gameData.widowDiscardsForFrogBidder = []; gameData.bidsThisRound = [];
     gameData.currentHighestBidDetails = null; gameData.trumpSuit = null;
@@ -101,14 +100,13 @@ function initializeNewRoundState() {
     gameData.lastCompletedTrick = null;
     gameData.playersWhoPassedThisRound = [];
     
-    // Initialize capturedTricks for human players in playerOrderActive
     if (gameData.playerOrderActive && gameData.playerOrderActive.length > 0) {
         gameData.playerOrderActive.forEach(pName => {
-            if (pName && gameData.scores && gameData.scores[pName] !== undefined) { // Check if player still exists in scores
+            if (pName && gameData.scores && gameData.scores[pName] !== undefined) {
                 gameData.capturedTricks[pName] = [];
             }
         });
-    } else { // Fallback if playerOrderActive isn't populated yet
+    } else { 
         gameData.playerSocketIds.forEach(socketId => {
             const pName = gameData.players[socketId];
             if (pName && gameData.scores && gameData.scores[pName] !== undefined) {
@@ -132,7 +130,8 @@ function resetFullGameData() {
         revealedWidowForFrog: [],
         lastCompletedTrick: null,
         playersWhoPassedThisRound: [],
-        playerMode: null // MODIFIED: Ensure playerMode is reset
+        playerMode: null,
+        serverVersion: SERVER_VERSION // Ensure server version is part of reset
     };
     console.log(`[${SERVER_VERSION}] Game data fully reset.`);
 }
@@ -158,13 +157,7 @@ function determineTrickWinner(trickCards, leadSuit, trumpSuit) {
     }
     if (highestTrumpPlay) winningPlay = highestTrumpPlay;
     else if (highestLeadSuitPlay) winningPlay = highestLeadSuitPlay;
-    // Fallback if no trump or lead suit cards won (e.g., all players played off-suit and no trump)
-    // This should ideally not be reached if rules for following suit/trumping are enforced and trick is valid.
-    // If only one card was played (e.g. start of trick), it can't be a winner yet.
-    // If multiple cards, and neither highestTrump nor highestLead found, implies issue or all reneged.
-    // The game rules (5.5) state: highest trump, if none, highest of lead suit.
-    // This logic covers those primary conditions.
-
+    
     return winningPlay ? winningPlay.playerName : null;
 }
 
@@ -222,7 +215,7 @@ io.on("connection", (socket) => {
     io.emit("gameState", gameData);
   });
 
-  socket.on("startGame", () => { // This is now for 4-Player games
+  socket.on("startGame", () => { 
     if (Object.keys(gameData.players).length !== 4) return socket.emit("error", "Need exactly 4 players to start a 4-player game.");
     if (gameData.gameStarted) return socket.emit("error", "Game already in progress.");
 
@@ -234,7 +227,7 @@ io.on("connection", (socket) => {
 
     gameData.playerOrderActive = [];
     const dealerIndex = gameData.playerSocketIds.indexOf(gameData.dealer);
-    for (let i = 1; i <= 3; i++) { // 3 active players
+    for (let i = 1; i <= 3; i++) { 
         const activePlayerSocketId = gameData.playerSocketIds[(dealerIndex + i) % 4];
         gameData.playerOrderActive.push(gameData.players[activePlayerSocketId]);
     }
@@ -257,7 +250,7 @@ io.on("connection", (socket) => {
 
     gameData.playerOrderActive = [];
     const dealerIndex = gameData.playerSocketIds.indexOf(gameData.dealer);
-    for (let i = 1; i <= 3; i++) { // All 3 players are active
+    for (let i = 1; i <= 3; i++) { 
         const activePlayerSocketId = gameData.playerSocketIds[(dealerIndex + i) % 3];
         gameData.playerOrderActive.push(gameData.players[activePlayerSocketId]);
     }
@@ -313,16 +306,16 @@ io.on("connection", (socket) => {
   }
 
   function resolveBiddingFinal() {
-    if (!gameData.currentHighestBidDetails) { // All players passed initially
+    if (!gameData.currentHighestBidDetails) { 
         gameData.state = "Round Skipped"; gameData.revealedWidowForFrog = [];
         gameData.lastCompletedTrick = null;
         console.log(`[${SERVER_VERSION}] All players passed. Round skipped. Preparing next round in 5s.`);
         setTimeout(() => { 
-            if (gameData.state === "Round Skipped") { // Check state again in case of reset
+            if (gameData.state === "Round Skipped" && gameData.gameStarted) { 
                  console.log(`[${SERVER_VERSION}] Round Skipped timeout executing. Preparing next round.`);
                  prepareNextRound(); 
             } else {
-                 console.log(`[${SERVER_VERSION}] Round Skipped timeout, but state changed to ${gameData.state}. Not preparing next round automatically.`);
+                 console.log(`[${SERVER_VERSION}] Round Skipped timeout, but state changed to ${gameData.state} or game ended. Not preparing next round automatically.`);
             }
         }, 5000);
     } else {
@@ -331,7 +324,7 @@ io.on("connection", (socket) => {
         gameData.trumpSuit = "H"; gameData.state = "FrogBidderConfirmWidow";
         io.to(gameData.bidWinnerInfo.playerId).emit("promptFrogBidderConfirmWidow");
       } else {
-        gameData.revealedWidowForFrog = []; // Clear this if not Frog
+        gameData.revealedWidowForFrog = []; 
         if (gameData.bidWinnerInfo.bid === "Heart Solo") { gameData.trumpSuit = "H"; transitionToPlayingPhase(); }
         else if (gameData.bidWinnerInfo.bid === "Solo") { gameData.state = "Trump Selection"; io.to(gameData.bidWinnerInfo.playerId).emit("promptChooseTrump"); }
         else { 
@@ -356,9 +349,8 @@ io.on("connection", (socket) => {
         if (bid === "Heart Solo") {
             gameData.currentHighestBidDetails = { playerId: socket.id, playerName: pName, bid: "Heart Solo" };
         }
-        // gameData.bidsMadeCount = 0; // Not used for primary logic
-        gameData.biddingTurnPlayerName = null; // Bidding sequence ends
-        resolveBiddingFinal(); // Resolve with new highest bid or pass
+        gameData.biddingTurnPlayerName = null; 
+        resolveBiddingFinal(); 
         return;
     }
 
@@ -379,30 +371,12 @@ io.on("connection", (socket) => {
 
     if (bid !== "Pass") {
       gameData.currentHighestBidDetails = { playerId: socket.id, playerName: pName, bid };
-      // Track original Frog bidder for potential upgrade
-      const bidderIndexInActiveOrder = gameData.playerOrderActive.indexOf(pName);
-      // The originalFrogBidderId is only set if the *first* bidder in the active order bids Frog.
-      // This needs careful thought: "Player A makes an initial "Frog" bid". "Initial" implies first bid of the round, or just their first bid?
-      // Assuming "initial" means their first bid, and it's a Frog.
-      // However, the example "Player A makes an initial "Frog" bid, and Player B ... bids "Solo"" implies A bid Frog, then B bid Solo over A.
-      // Let's stick to: if a Frog bid is made, and it's by the first player in gameData.playerOrderActive (who is first to bid)
-      // then they are potential originalFrogBidder. Simpler: any Frog bid could potentially be upgraded if it's the one being overbid by Solo.
-      // The current logic: `pName === gameData.playerOrderActive[0] && bid === "Frog" && !gameData.originalFrogBidderId`
-      // This means only the very first player to bid in the round, if they bid Frog, can be the `originalFrogBidderId`.
-      // If another player bids Frog later (e.g. P1 Pass, P2 Frog), P2 is not `originalFrogBidderId` by this logic.
-      // The rule "If Player A makes an initial "Frog" bid" suggests Player A made the Frog that is now being considered.
-      // Let's refine this: `originalFrogBidderId` should be set to the ID of the player whose Frog bid is currently the highest,
-      // if a Solo bid later comes from a *different* player.
       if (bid === "Frog" && (!gameData.originalFrogBidderId || !gameData.bidsThisRound.some(b => b.playerId === gameData.originalFrogBidderId && b.bidValue !== "Pass"))) {
-          // If this is the first Frog bid, or if the previous originalFrogBidder passed and this is a new Frog.
-          // Simplified: If current highest bid is this Frog, this player is a candidate.
-          // The crucial part is `soloBidMadeAfterFrog` which is set below.
-          // Let's set originalFrogBidderId to the current Frog bidder if no one else has claimed it yet.
           if(!gameData.originalFrogBidderId) gameData.originalFrogBidderId = socket.id;
       } else if (gameData.originalFrogBidderId && bid === "Solo" && socket.id !== gameData.originalFrogBidderId) {
           gameData.soloBidMadeAfterFrog = true;
       }
-    } else { // Player chose to Pass
+    } else { 
         if (!gameData.playersWhoPassedThisRound.includes(pName)) {
             gameData.playersWhoPassedThisRound.push(pName);
         }
@@ -411,16 +385,13 @@ io.on("connection", (socket) => {
     const activeBiddersRemaining = gameData.playerOrderActive.filter(playerName => !gameData.playersWhoPassedThisRound.includes(playerName));
     
     let endBidding = false;
-    if (activeBiddersRemaining.length === 0) { // All eligible players have passed or made the final bid
+    if (activeBiddersRemaining.length === 0) { 
         endBidding = true;
     } else if (activeBiddersRemaining.length === 1 && gameData.currentHighestBidDetails && activeBiddersRemaining[0] === gameData.currentHighestBidDetails.playerName) {
-        // Only the highest bidder remains, and they cannot bid against themselves.
         endBidding = true;
     } else if (gameData.playersWhoPassedThisRound.length === gameData.playerOrderActive.length) {
-        // Everyone has passed at some point, relevant if no actual bid was made.
         endBidding = true;
     }
-    // Additional check: if there's a bid, and all *other* active players (not the bidder) have now passed since that bid.
     if (!endBidding && gameData.currentHighestBidDetails) {
         const highestBidderName = gameData.currentHighestBidDetails.playerName;
         const otherActivePlayers = gameData.playerOrderActive.filter(player => player !== highestBidderName);
@@ -430,14 +401,13 @@ io.on("connection", (socket) => {
         }
     }
 
-
     if (endBidding) {
         gameData.biddingTurnPlayerName = null;
-        checkForFrogUpgrade(); // This will then call resolveBiddingFinal
+        checkForFrogUpgrade(); 
     } else {
         let currentBidderIndexInActiveOrder = gameData.playerOrderActive.indexOf(pName);
         let nextBidderName = null;
-        for (let i = 1; i < gameData.playerOrderActive.length; i++) { // Check up to 2 more players
+        for (let i = 1; i < gameData.playerOrderActive.length; i++) { 
             let nextIndex = (currentBidderIndexInActiveOrder + i) % gameData.playerOrderActive.length;
             let potentialNextBidder = gameData.playerOrderActive[nextIndex];
             if (!gameData.playersWhoPassedThisRound.includes(potentialNextBidder)) {
@@ -448,13 +418,10 @@ io.on("connection", (socket) => {
         if (nextBidderName) {
             gameData.biddingTurnPlayerName = nextBidderName;
         } else {
-            // This case implies everyone remaining has passed, should have been caught by endBidding logic.
-            // Or, only one non-passed player remains but they aren't the highest bidder (e.g. they passed earlier)
-            // This should theoretically lead to checkForFrogUpgrade if a bid is on table.
-            console.log(`[${SERVER_VERSION} PLACEBID WARN] Fallback: No eligible next bidder found. Current highest: ${gameData.currentHighestBidDetails?.bid}. Checking for frog upgrade.`);
+            console.log(`[${SERVER_VERSION} PLACEBID WARN] Fallback: No eligible next bidder. Checking frog upgrade.`);
             gameData.biddingTurnPlayerName = null;
             checkForFrogUpgrade(); 
-            return; // Exit to prevent sending another gameState if checkForFrogUpgrade handles it
+            return; 
         }
         io.emit("gameState", gameData);
     }
@@ -473,13 +440,12 @@ io.on("connection", (socket) => {
     if (!Array.isArray(discards) || discards.length !== 3) return socket.emit("error", "Must discard 3 cards.");
     
     let originalPlayerHand = gameData.hands[pName] || [];
-    let combinedForValidation = [...originalPlayerHand, ...gameData.originalDealtWidow]; // Cards available to discard from
-    
-    let tempCombinedCheck = [...combinedForValidation]; // Create a mutable copy for validation
+    let combinedForValidation = [...originalPlayerHand, ...gameData.originalDealtWidow]; 
+    let tempCombinedCheck = [...combinedForValidation]; 
     const allDiscardsValid = discards.every(dCard => { 
         const indexInCombined = tempCombinedCheck.indexOf(dCard); 
         if (indexInCombined > -1) { 
-            tempCombinedCheck.splice(indexInCombined, 1); // Remove to ensure unique selections if duplicates were possible
+            tempCombinedCheck.splice(indexInCombined, 1); 
             return true; 
         } 
         return false; 
@@ -488,10 +454,10 @@ io.on("connection", (socket) => {
     if (!allDiscardsValid) return socket.emit("error", "Invalid discards. Cards not found in combined hand and widow.");
     
     let finalHandAfterExchange = combinedForValidation.filter(card => !discards.includes(card));
-    gameData.hands[pName] = finalHandAfterExchange.sort(); // Assuming default sort is fine
-    gameData.widowDiscardsForFrogBidder = [...discards].sort(); // These are the points for the bidder
-    gameData.widow = [...discards].sort(); // The "widow" pile now contains these discards for record keeping
-    gameData.revealedWidowForFrog = []; // Hide the revealed original widow
+    gameData.hands[pName] = finalHandAfterExchange.sort(); 
+    gameData.widowDiscardsForFrogBidder = [...discards].sort(); 
+    gameData.widow = [...discards].sort(); 
+    gameData.revealedWidowForFrog = []; 
     
     console.log(`[${SERVER_VERSION}] Player ${pName} (Frog Bidder) discarded: ${discards.join(', ')}. New hand size: ${gameData.hands[pName].length}`);
     transitionToPlayingPhase();
@@ -533,36 +499,57 @@ io.on("connection", (socket) => {
     if (isLeading) gameData.leadSuitCurrentTrick = playedSuit;
     if (playedSuit === gameData.trumpSuit && !gameData.trumpBroken) gameData.trumpBroken = true;
 
-    const expectedCardsInTrick = 3; // Always 3 active players in a trick
+    const expectedCardsInTrick = 3; 
 
     if (gameData.currentTrickCards.length === expectedCardsInTrick) {
-      const winnerName = determineTrickWinner(gameData.currentTrickCards, gameData.leadSuitCurrentTrick, gameData.trumpSuit);
-      if (winnerName && gameData.capturedTricks[winnerName]) {
-          gameData.capturedTricks[winnerName].push([...gameData.currentTrickCards.map(p => p.card)]);
-      } else if (winnerName) {
-          console.warn(`[${SERVER_VERSION} WARN] capturedTricks not initialized for trick winner: ${winnerName}. Initializing now.`);
-          gameData.capturedTricks[winnerName] = [[...gameData.currentTrickCards.map(p => p.card)]];
+      const winnerNameOfTrick = determineTrickWinner(gameData.currentTrickCards, gameData.leadSuitCurrentTrick, gameData.trumpSuit);
+      const currentTrickNumber = gameData.tricksPlayedCount + 1;
+
+      if (winnerNameOfTrick && gameData.capturedTricks[winnerNameOfTrick]) {
+          gameData.capturedTricks[winnerNameOfTrick].push([...gameData.currentTrickCards.map(p => p.card)]);
+      } else if (winnerNameOfTrick) {
+          console.warn(`[${SERVER_VERSION} WARN] capturedTricks not initialized for trick winner: ${winnerNameOfTrick}. Initializing now.`);
+          gameData.capturedTricks[winnerNameOfTrick] = [[...gameData.currentTrickCards.map(p => p.card)]];
       } else {
           console.error(`[${SERVER_VERSION} ERROR] No winner determined for a full trick. Trick cards:`, gameData.currentTrickCards.map(c => c.card).join(', '));
       }
 
       gameData.lastCompletedTrick = {
-          cards: [...gameData.currentTrickCards],
-          winnerName: winnerName,
+          cards: [...gameData.currentTrickCards], // Keep a copy of the cards for this trick
+          winnerName: winnerNameOfTrick,
           leadSuit: gameData.leadSuitCurrentTrick,
-          trickNumber: gameData.tricksPlayedCount + 1
+          trickNumber: currentTrickNumber
       };
       gameData.tricksPlayedCount++;
-      gameData.trickLeaderName = winnerName; 
+      gameData.trickLeaderName = winnerNameOfTrick; // Winner of this trick for records, next leader set after linger
 
-      if (gameData.tricksPlayedCount === 11) {
+      if (gameData.tricksPlayedCount === 11) { // Last trick of the round
+        // No linger, proceed to scoring
         calculateRoundScores();
+        // currentTrickCards will be cleared by calculateRoundScores or initializeNewRoundState
       } else {
-          gameData.currentTrickCards = []; gameData.leadSuitCurrentTrick = null;
-          gameData.trickTurnPlayerName = winnerName;
-          io.emit("gameState", gameData);
+        // MODIFIED: Implement Trick Linger
+        gameData.state = "TrickCompleteLinger";
+        console.log(`[${SERVER_VERSION}] Trick ${currentTrickNumber} complete. Winner: ${winnerNameOfTrick}. Lingering for 2s.`);
+        io.emit("gameState", gameData); // Emit state with currentTrickCards still populated
+
+        setTimeout(() => {
+            // Safety check: ensure game is still in this state and for the same trick
+            if (gameData.gameStarted && gameData.state === "TrickCompleteLinger" && 
+                gameData.lastCompletedTrick && gameData.lastCompletedTrick.trickNumber === currentTrickNumber) {
+                
+                console.log(`[${SERVER_VERSION}] Linger timeout for trick ${currentTrickNumber}. Clearing trick and setting next turn.`);
+                gameData.currentTrickCards = []; 
+                gameData.leadSuitCurrentTrick = null;
+                gameData.trickTurnPlayerName = winnerNameOfTrick; // Winner of the trick leads next
+                gameData.state = "Playing Phase";
+                io.emit("gameState", gameData);
+            } else {
+                 console.log(`[${SERVER_VERSION} LINGER TIMEOUT] Game state changed or reset during linger for trick ${currentTrickNumber}. Aborting clear. Current state: ${gameData.state}`);
+            }
+        }, 2000); // 2-second linger
       }
-    } else {
+    } else { // Trick not yet full
       const currentTurnPlayerIndexInActiveOrder = gameData.playerOrderActive.indexOf(pName);
       if (currentTurnPlayerIndexInActiveOrder === -1) {
           console.error(`[${SERVER_VERSION} ERROR PLAYCARD] Current turn player ${pName} not found in active order: ${gameData.playerOrderActive.join(', ')}. Resetting.`);
@@ -600,10 +587,10 @@ io.on("connection", (socket) => {
     } else if (bidType === "Heart Solo") {
         awardedWidowInfo.cards = [...gameData.originalDealtWidow];
         awardedWidowInfo.points = calculateCardPoints(awardedWidowInfo.cards);
-        if (gameData.trickLeaderName === bidWinnerName) { // Winner of last trick was bidder
+        if (gameData.trickLeaderName === bidWinnerName) { 
             bidderTotalCardPoints += awardedWidowInfo.points;
             awardedWidowInfo.awardedTo = bidWinnerName;
-        } else { // Winner of last trick was a defender
+        } else { 
             defendersTotalCardPoints += awardedWidowInfo.points;
             awardedWidowInfo.awardedTo = gameData.trickLeaderName;
         }
@@ -636,7 +623,7 @@ io.on("connection", (socket) => {
         const playerName = gameData.players[id];
         if(playerName) humanPlayerScoresBeforeExchange[playerName] = gameData.scores[playerName];
     });
-    if(gameData.playerMode === 3 && gameData.scores[PLACEHOLDER_ID] !== undefined) { // For logging
+    if(gameData.playerMode === 3 && gameData.scores[PLACEHOLDER_ID] !== undefined) { 
         humanPlayerScoresBeforeExchange[PLACEHOLDER_ID] = gameData.scores[PLACEHOLDER_ID];
     }
 
@@ -654,7 +641,7 @@ io.on("connection", (socket) => {
         });
         gameData.scores[bidWinnerName] = (gameData.scores[bidWinnerName] || 0) + totalPointsGainedByBidder;
         roundMessage = `${bidWinnerName} (Bid: ${bidType}) succeeded! Gains ${totalPointsGainedByBidder} pts (receives ${exchangeValuePerPlayer} from each active opponent).`;
-    } else { // Bidder failed
+    } else { 
         bidMadeSuccessfully = false;
         let totalPointsLostByBidder = 0;
         const activeOpponents = gameData.playerOrderActive.filter(pName => pName !== bidWinnerName);
@@ -705,7 +692,7 @@ io.on("connection", (socket) => {
                 contenders.push(player.name);
             }
         });
-        if (contenders.length === 0 && humanPlayersWithScores.length > 0) { // All human players <= 0
+        if (contenders.length === 0 && humanPlayersWithScores.length > 0) { 
             highestScore = -Infinity; 
             humanPlayersWithScores.forEach(player => {
                 if (player.score > highestScore) { 
@@ -733,13 +720,12 @@ io.on("connection", (socket) => {
 
     console.log(`[${SERVER_VERSION} SCORING] Scores After Exchange:`, JSON.stringify(gameData.scores));
     const humanScoreSum = humanPlayersWithScores.reduce((sum, p) => sum + p.score, 0);
-    const totalExpectedScore = gameData.playerMode === 3 ? 120 * (humanPlayersWithScores.length +1) : 120 * humanPlayersWithScores.length; // +1 for placeholder
+    const totalExpectedScore = gameData.playerMode === 3 ? 120 * (humanPlayersWithScores.length +1) : 120 * humanPlayersWithScores.length; 
     const actualTotalScore = Object.values(gameData.scores).reduce((sum, s) => sum + s, 0);
 
     if (actualTotalScore !== totalExpectedScore) {
         console.warn(`[${SERVER_VERSION} SCORING WARNING ${gameData.playerMode}P] Total game points (${actualTotalScore}) != ${totalExpectedScore}! Human sum: ${humanScoreSum}`);
     }
-
 
     if (!isGameOver) gameData.state = "Awaiting Next Round Trigger";
     io.emit("gameState", gameData);
@@ -748,21 +734,20 @@ io.on("connection", (socket) => {
   function prepareNextRound() {
     const numHumanPlayers = gameData.playerSocketIds.length;
     if ((gameData.playerMode === 3 && numHumanPlayers !== 3) || (gameData.playerMode === 4 && numHumanPlayers !== 4)) {
-        console.error(`[${SERVER_VERSION} NEXT ROUND ERROR] Mismatch between playerMode (${gameData.playerMode}) and actual human players (${numHumanPlayers}). Resetting.`);
+        console.error(`[${SERVER_VERSION} NEXT ROUND ERROR] Mismatch playerMode (${gameData.playerMode}) and humans (${numHumanPlayers}). Resetting.`);
         resetFullGameData();
         io.emit("gameState", gameData); return;
     }
-    if (numHumanPlayers < 3) { // Should not happen if disconnect logic is sound
-        console.error(`[${SERVER_VERSION} NEXT ROUND ERROR] Insufficient players (${numHumanPlayers}) to prepare next round. Resetting.`);
+    if (numHumanPlayers < 3) { 
+        console.error(`[${SERVER_VERSION} NEXT ROUND ERROR] Insufficient players (${numHumanPlayers}). Resetting.`);
         resetFullGameData();
         io.emit("gameState", gameData); return;
     }
-
 
     let lastRoundDealerSocketId = gameData.roundSummary ? gameData.roundSummary.dealerOfRoundSocketId : gameData.dealer;
     if (!lastRoundDealerSocketId || !gameData.playerSocketIds.includes(lastRoundDealerSocketId)) {
-        console.warn(`[${SERVER_VERSION} NEXT ROUND WARN] Last round dealer ID (${lastRoundDealerSocketId}) not found or invalid among current players. Choosing new dealer from existing players.`);
-        if (gameData.playerSocketIds.length > 0) lastRoundDealerSocketId = gameData.playerSocketIds[0]; // Fallback: first player
+        console.warn(`[${SERVER_VERSION} NEXT ROUND WARN] Last dealer ID invalid. Choosing new from existing.`);
+        if (gameData.playerSocketIds.length > 0) lastRoundDealerSocketId = gameData.playerSocketIds[0]; 
         else { gameData.state = "Error - Cannot Rotate Dealer"; io.emit("gameState", gameData); return; }
     }
 
@@ -771,16 +756,16 @@ io.on("connection", (socket) => {
     gameData.dealer = gameData.playerSocketIds[nextDealerIndexInSockets];
 
     gameData.playerOrderActive = [];
-    const currentDealerIndex = gameData.playerSocketIds.indexOf(gameData.dealer); // Re-fetch index of new dealer
+    const currentDealerIndex = gameData.playerSocketIds.indexOf(gameData.dealer); 
 
     if (gameData.playerMode === 4) {
         for (let i = 1; i <= 3; i++) {
-            const activePlayerSocketId = gameData.playerSocketIds[(currentDealerIndex + i) % numHumanPlayers]; // numHumanPlayers is 4
+            const activePlayerSocketId = gameData.playerSocketIds[(currentDealerIndex + i) % numHumanPlayers]; 
             if (gameData.players[activePlayerSocketId]) gameData.playerOrderActive.push(gameData.players[activePlayerSocketId]);
         }
     } else if (gameData.playerMode === 3) {
         for (let i = 1; i <= 3; i++) {
-            const activePlayerSocketId = gameData.playerSocketIds[(currentDealerIndex + i) % numHumanPlayers]; // numHumanPlayers is 3
+            const activePlayerSocketId = gameData.playerSocketIds[(currentDealerIndex + i) % numHumanPlayers]; 
             if (gameData.players[activePlayerSocketId]) gameData.playerOrderActive.push(gameData.players[activePlayerSocketId]);
         }
     } else {
@@ -790,7 +775,7 @@ io.on("connection", (socket) => {
     }
     
     if (gameData.playerOrderActive.length !== 3) {
-        console.error(`[${SERVER_VERSION} NEXT ROUND CRITICAL ERROR] playerOrderActive not set to 3. Actual: ${gameData.playerOrderActive.length}. Mode: ${gameData.playerMode}. Resetting.`);
+        console.error(`[${SERVER_VERSION} NEXT ROUND CRITICAL ERROR] playerOrderActive not 3. Actual: ${gameData.playerOrderActive.length}. Mode: ${gameData.playerMode}. Resetting.`);
         resetFullGameData();
         io.emit("gameState", gameData); return;
     }
@@ -832,7 +817,7 @@ io.on("connection", (socket) => {
     const disconnectingSocketId = socket.id;
     console.log(`[${SERVER_VERSION} DISCONNECT] Player ${pName || 'Unknown'} (ID: ${disconnectingSocketId}) disconnected. Reason: ${reason}`);
     
-    if (pName) { // Only proceed if the disconnected socket was a known player
+    if (pName) { 
         const wasDealer = gameData.dealer === disconnectingSocketId || (gameData.roundSummary && gameData.roundSummary.dealerOfRoundSocketId === disconnectingSocketId);
         
         delete gameData.players[disconnectingSocketId];
@@ -851,16 +836,13 @@ io.on("connection", (socket) => {
                 resetFullGameData();
             } else if (wasDealer && gameData.state === "Awaiting Next Round Trigger") {
                  console.log(`[${SERVER_VERSION} DISCONNECT] Dealer ${pName} disconnected in 'Awaiting Next Round Trigger'. Game may stall or await manual reset.`);
-                 // Consider automatically advancing dealer if possible, or force reset. For now, it will stall.
-                 // Or, if only 3 players left in a 4P game, already reset. If 3P game and dealer left, one of 2 remaining needs to act.
             } else if (gameData.biddingTurnPlayerName === pName || gameData.trickTurnPlayerName === pName) {
                 console.log(`[${SERVER_VERSION} DISCONNECT] Active turn player ${pName} disconnected. Resetting game.`);
                 resetFullGameData();
             }
-            // If game state is stable otherwise and enough players remain for the mode, continue.
-        } else { // Game not started
+        } else { 
             if (numHumanPlayers === 3) gameData.state = "Ready to Start 3P or Wait";
-            else if (numHumanPlayers === 4) gameData.state = "Ready to Start 4P"; // Should not happen if one left from 4 to be 3.
+            else if (numHumanPlayers === 4) gameData.state = "Ready to Start 4P"; 
             else gameData.state = "Waiting for Players to Join";
         }
         io.emit("gameState", gameData);
