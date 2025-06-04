@@ -8,7 +8,7 @@ const cors =require("cors");
 const app = express();
 const server = http.createServer(app);
 
-const SERVER_VERSION = "3.0.1 - Trick Linger Logic"; // UPDATED SERVER VERSION
+const SERVER_VERSION = "3.0.2 - Insurance Mechanic Foundation"; // UPDATED SERVER VERSION
 console.log(`INCREMENTAL SERVER (${SERVER_VERSION}): Initializing...`);
 
 const io = new Server(server, {
@@ -35,6 +35,7 @@ const SUITS = { H: "Hearts", D: "Diamonds", C: "Clubs", S: "Spades" };
 const RANKS_ORDER = ["6", "7", "8", "9", "J", "Q", "K", "10", "A"];
 const CARD_POINT_VALUES = { "A": 11, "10": 10, "K": 4, "Q": 3, "J": 2, "9":0, "8":0, "7":0, "6":0 };
 const BID_HIERARCHY = ["Pass", "Frog", "Solo", "Heart Solo"];
+const BID_MULTIPLIERS = {"Frog": 1, "Solo": 2, "Heart Solo": 3}; // For insurance defaults
 const PLACEHOLDER_ID = "ScoreAbsorber"; 
 
 let deck = [];
@@ -58,7 +59,16 @@ let gameData = {
   lastCompletedTrick: null,
   playersWhoPassedThisRound: [],
   playerMode: null,
-  serverVersion: SERVER_VERSION // Added for client display
+  serverVersion: SERVER_VERSION,
+  // NEW: Insurance Data Structure
+  insurance: {
+    isActive: false,
+    bidderPlayerName: null,
+    bidderRequirement: 0,
+    defenderOffers: {}, // { playerName: offerValue }
+    dealExecuted: false,
+    executedDetails: null // { bidderReceived: X, defender1Paid: Y, defender2Paid: Z }
+  }
 };
 console.log(`INCREMENTAL SERVER (${SERVER_VERSION}): Initial gameData structure defined.`);
 
@@ -100,6 +110,16 @@ function initializeNewRoundState() {
     gameData.lastCompletedTrick = null;
     gameData.playersWhoPassedThisRound = [];
     
+    // Reset insurance data for the new round
+    gameData.insurance = {
+        isActive: false,
+        bidderPlayerName: null,
+        bidderRequirement: 0,
+        defenderOffers: {},
+        dealExecuted: false,
+        executedDetails: null
+    };
+    
     if (gameData.playerOrderActive && gameData.playerOrderActive.length > 0) {
         gameData.playerOrderActive.forEach(pName => {
             if (pName && gameData.scores && gameData.scores[pName] !== undefined) {
@@ -114,7 +134,7 @@ function initializeNewRoundState() {
             }
         });
     }
-    console.log(`[${SERVER_VERSION}] New round state initialized.`);
+    console.log(`[${SERVER_VERSION}] New round state initialized (insurance reset).`);
 }
 
 function resetFullGameData() {
@@ -131,12 +151,21 @@ function resetFullGameData() {
         lastCompletedTrick: null,
         playersWhoPassedThisRound: [],
         playerMode: null,
-        serverVersion: SERVER_VERSION // Ensure server version is part of reset
+        serverVersion: SERVER_VERSION,
+        insurance: { // Ensure insurance is reset here too
+            isActive: false,
+            bidderPlayerName: null,
+            bidderRequirement: 0,
+            defenderOffers: {},
+            dealExecuted: false,
+            executedDetails: null
+        }
     };
-    console.log(`[${SERVER_VERSION}] Game data fully reset.`);
+    console.log(`[${SERVER_VERSION}] Game data fully reset (insurance reset).`);
 }
 
 function determineTrickWinner(trickCards, leadSuit, trumpSuit) {
+    // ... (no changes to this function)
     if (!trickCards || trickCards.length === 0) return null;
     let winningPlay = null;
     let highestTrumpPlay = null;
@@ -161,7 +190,45 @@ function determineTrickWinner(trickCards, leadSuit, trumpSuit) {
     return winningPlay ? winningPlay.playerName : null;
 }
 
+// NEW FUNCTION: To initialize insurance data after a bid is won
+function initializeInsurancePhase() {
+    if (!gameData.bidWinnerInfo || !gameData.bidWinnerInfo.playerName || !gameData.bidWinnerInfo.bid) {
+        console.error(`[${SERVER_VERSION} INSURANCE ERROR] Cannot initialize insurance: bidWinnerInfo missing.`);
+        return;
+    }
+    const bidWinnerName = gameData.bidWinnerInfo.playerName;
+    const bidType = gameData.bidWinnerInfo.bid;
+    const multiplier = BID_MULTIPLIERS[bidType] || 1;
+
+    gameData.insurance.isActive = true;
+    gameData.insurance.bidderPlayerName = bidWinnerName;
+    gameData.insurance.bidderRequirement = 120 * multiplier; // Bidder's initial max expectation
+    gameData.insurance.defenderOffers = {};
+    gameData.insurance.dealExecuted = false;
+    gameData.insurance.executedDetails = null;
+
+    gameData.playerOrderActive.forEach(playerName => {
+        if (playerName !== bidWinnerName) {
+            // Defenders initially want to receive points, hence negative offer
+            gameData.insurance.defenderOffers[playerName] = -60 * multiplier; 
+        }
+    });
+
+    console.log(`[${SERVER_VERSION}] Insurance phase initialized. Bidder: ${bidWinnerName}, Req: ${gameData.insurance.bidderRequirement}, Offers:`, gameData.insurance.defenderOffers);
+    // No specific state change here, insurance becomes active alongside "Playing Phase" or just before.
+    // We will transition to Playing Phase and insurance UI will be available.
+}
+
+
 function transitionToPlayingPhase() {
+    // Initialize insurance data if a bid winner exists
+    if (gameData.bidWinnerInfo && gameData.bidWinnerInfo.playerName) {
+        initializeInsurancePhase(); // Call this before setting state to Playing Phase
+    } else {
+        // If no bid winner, ensure insurance is inactive (should be handled by new round init)
+        gameData.insurance.isActive = false;
+    }
+
     gameData.state = "Playing Phase";
     gameData.tricksPlayedCount = 0;
     gameData.trumpBroken = false;
@@ -178,11 +245,12 @@ function transitionToPlayingPhase() {
         io.emit("gameState", gameData); return;
     }
     console.log(`[${SERVER_VERSION}] Transitioning to Playing Phase. Bid Winner: ${gameData.bidWinnerInfo.playerName}, Trump: ${gameData.trumpSuit}`);
-    io.emit("gameState", gameData);
+    // gameState (including insurance data) will be emitted by the function that calls transitionToPlayingPhase
 }
 console.log(`INCREMENTAL SERVER (${SERVER_VERSION}): Helper functions defined.`);
 
 io.on("connection", (socket) => {
+  // ... (submitName, startGame, startThreePlayerGame, dealCards remain the same)
   console.log(`!!!! [${SERVER_VERSION} CONNECT] ID: ${socket.id}, Transport: ${socket.conn.transport.name}`);
   socket.emit("gameState", gameData);
 
@@ -283,10 +351,13 @@ io.on("connection", (socket) => {
     gameData.roundSummary = null;
     gameData.lastCompletedTrick = null;
     gameData.playersWhoPassedThisRound = [];
+    // Insurance data is reset in initializeNewRoundState, will be set up after bidding.
     io.emit("gameState", gameData);
   });
 
+
   function checkForFrogUpgrade() {
+    // ... (no changes to this function)
     const isFrogBidderHighestOrSoloByOtherIsHighest =
         gameData.currentHighestBidDetails &&
         ( (gameData.currentHighestBidDetails.bid === "Frog" && gameData.currentHighestBidDetails.playerId === gameData.originalFrogBidderId) ||
@@ -306,9 +377,11 @@ io.on("connection", (socket) => {
   }
 
   function resolveBiddingFinal() {
+    // ... (this function now calls transitionToPlayingPhase, which initializes insurance)
     if (!gameData.currentHighestBidDetails) { 
         gameData.state = "Round Skipped"; gameData.revealedWidowForFrog = [];
         gameData.lastCompletedTrick = null;
+        gameData.insurance.isActive = false; // Ensure insurance is off if round skipped
         console.log(`[${SERVER_VERSION}] All players passed. Round skipped. Preparing next round in 5s.`);
         setTimeout(() => { 
             if (gameData.state === "Round Skipped" && gameData.gameStarted) { 
@@ -322,11 +395,12 @@ io.on("connection", (socket) => {
       gameData.bidWinnerInfo = { ...gameData.currentHighestBidDetails };
       if (gameData.bidWinnerInfo.bid === "Frog") {
         gameData.trumpSuit = "H"; gameData.state = "FrogBidderConfirmWidow";
+        // Insurance will be initialized in transitionToPlayingPhase AFTER widow exchange
         io.to(gameData.bidWinnerInfo.playerId).emit("promptFrogBidderConfirmWidow");
       } else {
         gameData.revealedWidowForFrog = []; 
         if (gameData.bidWinnerInfo.bid === "Heart Solo") { gameData.trumpSuit = "H"; transitionToPlayingPhase(); }
-        else if (gameData.bidWinnerInfo.bid === "Solo") { gameData.state = "Trump Selection"; io.to(gameData.bidWinnerInfo.playerId).emit("promptChooseTrump"); }
+        else if (gameData.bidWinnerInfo.bid === "Solo") { gameData.state = "Trump Selection"; /* Insurance after trump selection via transitionToPlayingPhase */ }
         else { 
             console.error(`[${SERVER_VERSION} ERROR] Invalid bid outcome in resolveBiddingFinal: ${gameData.bidWinnerInfo.bid}`);
             gameData.state = "Error - Invalid Bid Outcome"; 
@@ -334,10 +408,15 @@ io.on("connection", (socket) => {
       }
     }
     gameData.originalFrogBidderId = null; gameData.soloBidMadeAfterFrog = false;
-    io.emit("gameState", gameData);
+    // Emit gameState after specific paths in this function, or after transitionToPlayingPhase
+    // transitionToPlayingPhase will emit its own gameState after initializing insurance
+    if (gameData.state !== "Playing Phase" && gameData.state !== "Trump Selection" && gameData.state !== "FrogBidderConfirmWidow") {
+        io.emit("gameState", gameData);
+    }
   }
 
   socket.on("placeBid", ({ bid }) => {
+    // ... (no changes to this function regarding insurance logic yet)
     const pName = getPlayerNameById(socket.id);
     if (!pName) return socket.emit("error", "Player not found.");
 
@@ -428,6 +507,7 @@ io.on("connection", (socket) => {
   });
 
   socket.on("frogBidderConfirmsWidowTake", () => {
+    // ... (transitionToPlayingPhase will be called after discards, which initializes insurance)
     if (!gameData.bidWinnerInfo || socket.id !== gameData.bidWinnerInfo.playerId || gameData.bidWinnerInfo.bid !== "Frog" || gameData.state !== "FrogBidderConfirmWidow") return socket.emit("error", "Not authorized or wrong phase.");
     gameData.state = "Frog Widow Exchange"; gameData.revealedWidowForFrog = [...gameData.originalDealtWidow];
     io.to(gameData.bidWinnerInfo.playerId).emit("promptFrogWidowExchange", { widow: [...gameData.originalDealtWidow] });
@@ -435,6 +515,7 @@ io.on("connection", (socket) => {
   });
 
   socket.on("submitFrogDiscards", ({ discards }) => {
+    // ... (transitionToPlayingPhase is called here, which initializes insurance)
     const pName = getPlayerNameById(socket.id);
     if (!gameData.bidWinnerInfo || socket.id !== gameData.bidWinnerInfo.playerId || gameData.bidWinnerInfo.bid !== "Frog" || gameData.state !== "Frog Widow Exchange") return socket.emit("error", "Not authorized or wrong phase.");
     if (!Array.isArray(discards) || discards.length !== 3) return socket.emit("error", "Must discard 3 cards.");
@@ -460,20 +541,86 @@ io.on("connection", (socket) => {
     gameData.revealedWidowForFrog = []; 
     
     console.log(`[${SERVER_VERSION}] Player ${pName} (Frog Bidder) discarded: ${discards.join(', ')}. New hand size: ${gameData.hands[pName].length}`);
-    transitionToPlayingPhase();
+    transitionToPlayingPhase(); // This will initialize insurance
+    io.emit("gameState", gameData); // transitionToPlayingPhase already emits
   });
 
   socket.on("chooseTrump", (suitKey) => {
+    // ... (transitionToPlayingPhase is called here, which initializes insurance)
     if (gameData.state !== "Trump Selection" || !gameData.bidWinnerInfo || socket.id !== gameData.bidWinnerInfo.playerId) return socket.emit("error", "Not authorized or wrong phase.");
     if (!["D", "S", "C"].includes(suitKey)) return socket.emit("error", "Invalid trump for Solo (must be D, S, or C).");
     gameData.trumpSuit = suitKey;
     console.log(`[${SERVER_VERSION}] Trump chosen for Solo: ${SUITS[suitKey]} by ${getPlayerNameById(gameData.bidWinnerInfo.playerId)}`);
-    transitionToPlayingPhase();
+    transitionToPlayingPhase(); // This will initialize insurance
+    io.emit("gameState", gameData); // transitionToPlayingPhase already emits
   });
 
+  // NEW SOCKET EVENT HANDLER for Insurance
+  socket.on("updateInsuranceSetting", ({ settingType, value }) => {
+    const playerName = getPlayerNameById(socket.id);
+    if (!playerName) return socket.emit("error", "Player not found for insurance update.");
+    if (!gameData.insurance.isActive || gameData.insurance.dealExecuted) {
+        return socket.emit("error", "Insurance is not active or deal already executed.");
+    }
+
+    const multiplier = BID_MULTIPLIERS[gameData.bidWinnerInfo.bid] || 1;
+    let isValidUpdate = false;
+
+    if (settingType === "bidderRequirement" && playerName === gameData.insurance.bidderPlayerName) {
+        // Validate bidder's requirement value (e.g., within -120*mult to 120*mult)
+        const minReq = -120 * multiplier;
+        const maxReq = 120 * multiplier;
+        if (typeof value === 'number' && value >= minReq && value <= maxReq) {
+            gameData.insurance.bidderRequirement = value;
+            isValidUpdate = true;
+            console.log(`[${SERVER_VERSION} INSURANCE] Bidder ${playerName} updated requirement to: ${value}`);
+        } else {
+            return socket.emit("error", `Invalid requirement value. Must be between ${minReq} and ${maxReq}.`);
+        }
+    } else if (settingType === "defenderOffer" && gameData.insurance.defenderOffers.hasOwnProperty(playerName)) {
+        // Validate defender's offer value (e.g., within -60*mult to 60*mult)
+        const minOffer = -60 * multiplier;
+        const maxOffer = 60 * multiplier; // Max a defender might pay
+        if (typeof value === 'number' && value >= minOffer && value <= maxOffer) {
+            gameData.insurance.defenderOffers[playerName] = value;
+            isValidUpdate = true;
+            console.log(`[${SERVER_VERSION} INSURANCE] Defender ${playerName} updated offer to: ${value}`);
+        } else {
+            return socket.emit("error", `Invalid offer value. Must be between ${minOffer} and ${maxOffer}.`);
+        }
+    } else {
+        return socket.emit("error", "Invalid insurance setting update request.");
+    }
+
+    if (isValidUpdate) {
+        // TODO LATER: Check for deal execution here:
+        // let sumOfDefenderOffers = 0;
+        // Object.values(gameData.insurance.defenderOffers).forEach(offer => sumOfDefenderOffers += offer);
+        // if (sumOfDefenderOffers >= gameData.insurance.bidderRequirement) {
+        //     console.log(`[${SERVER_VERSION} INSURANCE] DEAL EXECUTED!`);
+        //     gameData.insurance.dealExecuted = true;
+        //     // gameData.insurance.isActive = false; // Or a new state
+        //     // Perform score changes immediately
+        //     // Store executedDetails
+        //     // This part will be implemented in a future step.
+        // }
+        io.emit("gameState", gameData);
+    }
+  });
+
+
   socket.on("playCard", ({ card }) => {
+    // ... (no changes to this function regarding insurance logic yet, but insurance deal could execute here)
     const pName = getPlayerNameById(socket.id);
-    if (!pName || gameData.state !== "Playing Phase" || pName !== gameData.trickTurnPlayerName) return socket.emit("error", "Invalid play action.");
+    if (!pName || (gameData.state !== "Playing Phase" && gameData.state !== "TrickCompleteLinger") || pName !== gameData.trickTurnPlayerName) {
+        // Allow play if it's TrickCompleteLinger but still this player's logical turn to lead next
+        if(!(gameData.state === "TrickCompleteLinger" && gameData.lastCompletedTrick && gameData.lastCompletedTrick.winnerName === pName)) {
+             return socket.emit("error", "Invalid play action or not your turn.");
+        }
+    }
+    // If an insurance deal has been executed, cards are just played out "for fun"
+    // No new rule validation specific to insurance needed here for card play itself.
+
     const hand = gameData.hands[pName];
     if (!hand || !hand.includes(card)) return socket.emit("error", "Card not in hand.");
 
@@ -515,41 +662,37 @@ io.on("connection", (socket) => {
       }
 
       gameData.lastCompletedTrick = {
-          cards: [...gameData.currentTrickCards], // Keep a copy of the cards for this trick
+          cards: [...gameData.currentTrickCards], 
           winnerName: winnerNameOfTrick,
           leadSuit: gameData.leadSuitCurrentTrick,
           trickNumber: currentTrickNumber
       };
       gameData.tricksPlayedCount++;
-      gameData.trickLeaderName = winnerNameOfTrick; // Winner of this trick for records, next leader set after linger
+      gameData.trickLeaderName = winnerNameOfTrick; 
 
-      if (gameData.tricksPlayedCount === 11) { // Last trick of the round
-        // No linger, proceed to scoring
+      if (gameData.tricksPlayedCount === 11) { 
         calculateRoundScores();
-        // currentTrickCards will be cleared by calculateRoundScores or initializeNewRoundState
       } else {
-        // MODIFIED: Implement Trick Linger
         gameData.state = "TrickCompleteLinger";
         console.log(`[${SERVER_VERSION}] Trick ${currentTrickNumber} complete. Winner: ${winnerNameOfTrick}. Lingering for 2s.`);
-        io.emit("gameState", gameData); // Emit state with currentTrickCards still populated
+        io.emit("gameState", gameData); 
 
         setTimeout(() => {
-            // Safety check: ensure game is still in this state and for the same trick
             if (gameData.gameStarted && gameData.state === "TrickCompleteLinger" && 
                 gameData.lastCompletedTrick && gameData.lastCompletedTrick.trickNumber === currentTrickNumber) {
                 
                 console.log(`[${SERVER_VERSION}] Linger timeout for trick ${currentTrickNumber}. Clearing trick and setting next turn.`);
                 gameData.currentTrickCards = []; 
                 gameData.leadSuitCurrentTrick = null;
-                gameData.trickTurnPlayerName = winnerNameOfTrick; // Winner of the trick leads next
+                gameData.trickTurnPlayerName = winnerNameOfTrick; 
                 gameData.state = "Playing Phase";
                 io.emit("gameState", gameData);
             } else {
                  console.log(`[${SERVER_VERSION} LINGER TIMEOUT] Game state changed or reset during linger for trick ${currentTrickNumber}. Aborting clear. Current state: ${gameData.state}`);
             }
-        }, 2000); // 2-second linger
+        }, 2000); 
       }
-    } else { // Trick not yet full
+    } else { 
       const currentTurnPlayerIndexInActiveOrder = gameData.playerOrderActive.indexOf(pName);
       if (currentTurnPlayerIndexInActiveOrder === -1) {
           console.error(`[${SERVER_VERSION} ERROR PLAYCARD] Current turn player ${pName} not found in active order: ${gameData.playerOrderActive.join(', ')}. Resetting.`);
@@ -563,13 +706,67 @@ io.on("connection", (socket) => {
   });
 
   function calculateRoundScores() {
+    // If insurance deal was executed, this standard scoring is skipped or modified
+    if (gameData.insurance.dealExecuted) {
+        console.log(`[${SERVER_VERSION} SCORING] Insurance deal was executed. Standard scoring for bid bypassed.`);
+        // Scores were already adjusted when insurance deal executed.
+        // We still need to populate a roundSummary.
+        const bidWinnerName = gameData.insurance.bidderPlayerName; // Or from bidWinnerInfo
+        const bidType = gameData.bidWinnerInfo.bid; // Need to ensure bidWinnerInfo is still valid
+        
+        gameData.roundSummary = {
+            bidWinnerName: bidWinnerName,
+            bidType: bidType,
+            trumpSuit: gameData.trumpSuit,
+            bidderCardPoints: 0, // Not relevant as insurance took over
+            defenderCardPoints: 0, // Not relevant
+            awardedWidowInfo: { cards: [], points: 0, awardedTo: "Insurance" }, // Indicate insurance
+            bidMadeSuccessfully: true, // Or a new status like 'SettledByInsurance'
+            finalScores: { ...gameData.scores }, 
+            isGameOver: Object.values(gameData.scores).some(score => score <= 0 && !Object.keys(gameData.scores).includes(PLACEHOLDER_ID)), // Check human players
+            gameWinner: null, // Determine winner based on final scores
+            message: `Round settled by Insurance. ${gameData.insurance.executedDetails ? JSON.stringify(gameData.insurance.executedDetails) : ''}`,
+            dealerOfRoundSocketId: gameData.dealer,
+            insuranceDealDetails: gameData.insurance.executedDetails
+        };
+        if (gameData.roundSummary.isGameOver) {
+            // Determine winner logic (same as below)
+            let contenders = []; let highestScore = -Infinity;
+            gameData.playerSocketIds.forEach(socketId => {
+                const pName = gameData.players[socketId];
+                if (pName && gameData.scores[pName] !== undefined) {
+                    if (gameData.scores[pName] > highestScore) { highestScore = gameData.scores[pName]; contenders = [pName]; }
+                    else if (gameData.scores[pName] === highestScore) contenders.push(pName);
+                }
+            });
+             if (contenders.length === 0 && gameData.playerSocketIds.length > 0) { // All human players <= 0
+                highestScore = -Infinity; 
+                gameData.playerSocketIds.forEach(socketId => {
+                    const pName = gameData.players[socketId];
+                    if (pName && gameData.scores[pName] !== undefined) {
+                        if (gameData.scores[pName] > highestScore) { highestScore = gameData.scores[pName]; contenders = [pName];}
+                        else if (gameData.scores[pName] === highestScore) contenders.push(pName);
+                    }
+                });
+            }
+            gameData.roundSummary.gameWinner = contenders.join(" & ");
+            gameData.roundSummary.message += ` GAME OVER! Winner(s): ${gameData.roundSummary.gameWinner}.`;
+            gameData.state = "Game Over";
+        } else {
+            gameData.state = "Awaiting Next Round Trigger";
+        }
+        io.emit("gameState", gameData);
+        return;
+    }
+
+    // ... (rest of existing calculateRoundScores logic if insurance not executed)
     if (!gameData.bidWinnerInfo || gameData.tricksPlayedCount !== 11) {
         console.error(`[${SERVER_VERSION} SCORING ERROR] PreRequisites not met. BidWinner: ${!!gameData.bidWinnerInfo}, TricksPlayed: ${gameData.tricksPlayedCount}`);
         gameData.state = "Error - Scoring PreRequisite"; io.emit("gameState", gameData); return;
     }
     const bidWinnerName = gameData.bidWinnerInfo.playerName;
     const bidType = gameData.bidWinnerInfo.bid;
-    const bidMultiplier = {"Frog": 1, "Solo": 2, "Heart Solo": 3}[bidType];
+    const bidMultiplier = BID_MULTIPLIERS[bidType] || 1;
     let bidderTotalCardPoints = 0;
     let defendersTotalCardPoints = 0;
     let awardedWidowInfo = { cards: [], points: 0, awardedTo: null };
@@ -732,6 +929,7 @@ io.on("connection", (socket) => {
   }
 
   function prepareNextRound() {
+    // ... (no changes to this function)
     const numHumanPlayers = gameData.playerSocketIds.length;
     if ((gameData.playerMode === 3 && numHumanPlayers !== 3) || (gameData.playerMode === 4 && numHumanPlayers !== 4)) {
         console.error(`[${SERVER_VERSION} NEXT ROUND ERROR] Mismatch playerMode (${gameData.playerMode}) and humans (${numHumanPlayers}). Resetting.`);
@@ -780,13 +978,14 @@ io.on("connection", (socket) => {
         io.emit("gameState", gameData); return;
     }
 
-    initializeNewRoundState();
+    initializeNewRoundState(); // This will reset insurance data for the new round
     gameData.state = "Dealing Pending";
     console.log(`[${SERVER_VERSION}] Next round prepared. Mode: ${gameData.playerMode}P. New Dealer: ${getPlayerNameById(gameData.dealer)}. Active: ${gameData.playerOrderActive.join(', ')}`);
     io.emit("gameState", gameData);
   }
 
   socket.on("requestNextRound", () => {
+    // ... (no changes to this function)
     if (gameData.state === "Awaiting Next Round Trigger" && gameData.roundSummary && socket.id === gameData.roundSummary.dealerOfRoundSocketId) {
         prepareNextRound();
     } else {
@@ -806,6 +1005,7 @@ io.on("connection", (socket) => {
   });
 
   socket.on("requestBootAll", () => {
+    // ... (no changes to this function)
     const playerName = getPlayerNameById(socket.id) || "A player";
     console.log(`[${SERVER_VERSION} REQUESTBOOTALL] Received from ${playerName} (${socket.id}). Resetting game for all.`);
     resetFullGameData();
@@ -813,6 +1013,7 @@ io.on("connection", (socket) => {
   });
 
   socket.on("disconnect", (reason) => {
+    // ... (no changes to this function)
     const pName = getPlayerNameById(socket.id);
     const disconnectingSocketId = socket.id;
     console.log(`[${SERVER_VERSION} DISCONNECT] Player ${pName || 'Unknown'} (ID: ${disconnectingSocketId}) disconnected. Reason: ${reason}`);
@@ -824,6 +1025,14 @@ io.on("connection", (socket) => {
         if (gameData.scores[pName] !== undefined) delete gameData.scores[pName];
         gameData.playerSocketIds = gameData.playerSocketIds.filter(id => id !== disconnectingSocketId);
         gameData.playerOrderActive = gameData.playerOrderActive.filter(name => name !== pName);
+        // Also remove from insurance offers if they were a defender
+        if (gameData.insurance && gameData.insurance.defenderOffers && gameData.insurance.defenderOffers[pName] !== undefined) {
+            delete gameData.insurance.defenderOffers[pName];
+            console.log(`[${SERVER_VERSION} INSURANCE] Removed disconnected defender ${pName} from insurance offers.`);
+            // TODO LATER: If an insurance deal was active, this might invalidate it or require recalculation/notification.
+            // For now, just removing. If a deal was already struck, it stands. If not, the gap changes.
+        }
+
 
         const numHumanPlayers = gameData.playerSocketIds.length;
 
@@ -839,6 +1048,11 @@ io.on("connection", (socket) => {
             } else if (gameData.biddingTurnPlayerName === pName || gameData.trickTurnPlayerName === pName) {
                 console.log(`[${SERVER_VERSION} DISCONNECT] Active turn player ${pName} disconnected. Resetting game.`);
                 resetFullGameData();
+            }
+             // If bidder disconnects while insurance is active
+            if (gameData.insurance && gameData.insurance.isActive && gameData.insurance.bidderPlayerName === pName) {
+                console.log(`[${SERVER_VERSION} INSURANCE] Bidder ${pName} disconnected during active insurance. Resetting game.`);
+                resetFullGameData(); // Or handle more gracefully, e.g., void insurance
             }
         } else { 
             if (numHumanPlayers === 3) gameData.state = "Ready to Start 3P or Wait";
