@@ -9,7 +9,7 @@ const { v4: uuidv4 } = require('uuid');
 const app = express();
 const server = http.createServer(app);
 
-const SERVER_VERSION = "4.5.0 - Full Game Logic & Bug Fixes";
+const SERVER_VERSION = "4.5.1 - Bidding & Seating Bug Fixes";
 console.log(`LOBBY SERVER (${SERVER_VERSION}): Initializing...`);
 
 const io = new Server(server, {
@@ -85,6 +85,8 @@ const resetTableData = (tableId) => {
     tables[tableId] = getInitialGameData(tableId);
     Object.keys(oldTable.players).forEach(pId => { if (players[pId]) tables[tableId].spectators[pId] = players[pId].name; });
     Object.keys(oldTable.spectators).forEach(pId => { if (players[pId]) tables[tableId].spectators[pId] = players[pId].name; });
+    io.to(tableId).emit("gameState", tables[tableId]);
+    io.emit("lobbyInfo", getLobbyInfo());
 };
 
 const determineTrickWinner = (trickCards, leadSuit, trumpSuit) => {
@@ -113,6 +115,7 @@ const transitionToPlayingPhase = (table) => {
 
 const calculateRoundScores = (table) => {
     if (!table.bidWinnerInfo || table.tricksPlayedCount !== 11) return;
+    // ... scoring logic from previous version ...
     const bidWinnerName = table.bidWinnerInfo.playerName;
     const bidType = table.bidWinnerInfo.bid;
     const currentBidMultiplier = BID_MULTIPLIERS[bidType];
@@ -208,6 +211,7 @@ const prepareNextRound = (table) => {
 
 // --- Socket Handlers ---
 io.on("connection", (socket) => {
+    // Connection, join, leave handlers are the same...
     socket.on("requestPlayerId", (existingPlayerId) => {
         let pId = existingPlayerId;
         if (pId && players[pId]) {
@@ -345,11 +349,10 @@ io.on("connection", (socket) => {
         table.bidsThisRound.push({ playerId, playerName: pName, bid });
         if (bid !== "Pass") table.currentHighestBidDetails = { playerId, playerName: pName, bid };
         else table.playersWhoPassedThisRound.push(pName);
-
-        // This is the fixed condition
-        const endBidding = (table.playersWhoPassedThisRound.length === table.playerOrderActive.length) || (table.currentHighestBidDetails && table.playersWhoPassedThisRound.length === table.playerOrderActive.length - 1);
         
-        if (endBidding) {
+        // BUG FIX: The bidding ends if all players have passed OR if all but one player has passed.
+        const activeBidders = table.playerOrderActive.filter(name => !table.playersWhoPassedThisRound.includes(name));
+        if (activeBidders.length <= 1) {
             resolveBiddingFinal(table);
         } else {
             let currentIdx = table.playerOrderActive.indexOf(pName);
@@ -364,7 +367,6 @@ io.on("connection", (socket) => {
         const table = tables[tableId];
         if (!table || table.state !== "FrogBidderConfirmWidow" || table.bidWinnerInfo.playerId !== playerId) return;
         table.state = "Frog Widow Exchange";
-        // The server doesn't emit 'promptFrogWidowExchange' to a specific player ID with socket.io v3+, use the socket object itself.
         const playerSocket = io.sockets.sockets.get(players[playerId].socketId);
         if(playerSocket) playerSocket.emit("promptFrogWidowExchange", { widow: [...table.originalDealtWidow] });
         io.to(tableId).emit("gameState", table);
@@ -411,7 +413,9 @@ io.on("connection", (socket) => {
         if (table.currentTrickCards.length === table.playerOrderActive.length) {
             const winnerId = determineTrickWinner(table.currentTrickCards, table.leadSuitCurrentTrick, table.trumpSuit);
             const winnerName = getPlayerNameById(winnerId, table);
-            if(winnerName) table.capturedTricks[winnerName].push(table.currentTrickCards.map(p=>p.card));
+            if(winnerName && table.capturedTricks[winnerName]) {
+                table.capturedTricks[winnerName].push(table.currentTrickCards.map(p=>p.card));
+            }
 
             table.lastCompletedTrick = { cards: [...table.currentTrickCards], winnerName, leadSuit: table.leadSuitCurrentTrick, trickNumber: table.tricksPlayedCount + 1 };
             table.tricksPlayedCount++;
@@ -453,7 +457,7 @@ io.on("connection", (socket) => {
         
         delete table.spectators[playerId];
         table.players[playerId] = {name: player.name, disconnected: false};
-        table.playerIds.push(playerId);
+        table.playerIds.push(playerId); // BUG FIX: Ensure new player is added to the playerIds list
         table.scores[player.name] = 120;
         
         const numPlayers = Object.keys(table.players).length;
@@ -475,7 +479,7 @@ io.on("connection", (socket) => {
         }
     });
 
-    socket.on("requestBootAll", ({tableId}) => { resetTableData(tableId); io.to(tableId).emit("gameState", tables[tableId]); io.emit("lobbyInfo", getLobbyInfo()); });
+    socket.on("requestBootAll", ({tableId}) => { resetTableData(tableId); });
 });
 
 initializeTables();
