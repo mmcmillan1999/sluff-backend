@@ -1,4 +1,4 @@
-// --- Backend/server.js (v4.3.2) ---
+// --- Backend/server.js (v4.4.2) ---
 require("dotenv").config();
 const http = require("http");
 const { Server } = require("socket.io");
@@ -10,7 +10,7 @@ const app = express();
 const server = http.createServer(app);
 
 // --- VERSION UPDATED ---
-const SERVER_VERSION = "4.3.2 - Fixed Bidding & Frog Discard Logic";
+const SERVER_VERSION = "4.4.2 - Fixed Trump Enforcement Logic";
 console.log(`SLUFF SERVER (${SERVER_VERSION}): Initializing...`);
 
 const io = new Server(server, {
@@ -434,16 +434,21 @@ io.on("connection", (socket) => {
         transitionToPlayingPhase(table);
     });
 
+    // --- FUNCTION UPDATED ---
     socket.on("playCard", ({ tableId, card }) => {
         const table = tables[tableId];
         if (!table) return;
         const playerId = sockets[socket.id];
         const pName = getPlayerNameByPlayerId(playerId, table);
+
         if (!pName || table.state !== "Playing Phase" || pName !== table.trickTurnPlayerName) return;
+        
         const hand = table.hands[pName];
         if (!hand || !hand.includes(card)) return;
+        
         const isLeading = table.currentTrickCards.length === 0;
         const playedSuit = getSuit(card);
+
         if (isLeading) {
             if (playedSuit === table.trumpSuit && !table.trumpBroken) {
                 const isHandAllTrump = hand.every(c => getSuit(c) === table.trumpSuit);
@@ -452,23 +457,39 @@ io.on("connection", (socket) => {
         } else {
             const leadCardSuit = table.leadSuitCurrentTrick;
             const hasLeadSuit = hand.some(c => getSuit(c) === leadCardSuit);
-            if (playedSuit !== leadCardSuit && hasLeadSuit) return socket.emit("error", `Must follow ${SUITS[leadCardSuit]}.`);
+
+            if (playedSuit !== leadCardSuit && hasLeadSuit) {
+                return socket.emit("error", `Must follow ${SUITS[leadCardSuit]}.`);
+            }
+
+            if (!hasLeadSuit) {
+                const hasTrump = hand.some(c => getSuit(c) === table.trumpSuit);
+                if (hasTrump && playedSuit !== table.trumpSuit) {
+                    return socket.emit("error", "You are out of the lead suit and must play trump.");
+                }
+            }
         }
+        
         table.hands[pName] = hand.filter(c => c !== card);
         table.currentTrickCards.push({ playerId, playerName: pName, card });
+        
         if (isLeading) table.leadSuitCurrentTrick = playedSuit;
         if (playedSuit === table.trumpSuit) table.trumpBroken = true;
+        
         const expectedCardsInTrick = table.playerOrderActive.length;
         if (table.currentTrickCards.length === expectedCardsInTrick) {
             const winnerNameOfTrick = determineTrickWinner(table.currentTrickCards, table.leadSuitCurrentTrick, table.trumpSuit);
             const currentTrickNumber = table.tricksPlayedCount + 1;
+            
             if (winnerNameOfTrick) {
                 if (!table.capturedTricks[winnerNameOfTrick]) table.capturedTricks[winnerNameOfTrick] = [];
                 table.capturedTricks[winnerNameOfTrick].push(table.currentTrickCards.map(p => p.card));
             }
+            
             table.lastCompletedTrick = { cards: [...table.currentTrickCards], winnerName: winnerNameOfTrick, leadSuit: table.leadSuitCurrentTrick, trickNumber: currentTrickNumber };
             table.tricksPlayedCount++;
             table.trickLeaderName = winnerNameOfTrick;
+            
             if (table.tricksPlayedCount === 11) {
                 calculateRoundScores(tableId);
             } else {
