@@ -1,4 +1,4 @@
-// --- Backend/server.js (Refactored for Multi-Table Lobby) ---
+// --- Backend/server.js (Refactored & Restored Game Logic) ---
 require("dotenv").config();
 const http = require("http");
 const { Server } = require("socket.io");
@@ -9,7 +9,7 @@ const { v4: uuidv4 } = require('uuid');
 const app = express();
 const server = http.createServer(app);
 
-const SERVER_VERSION = "4.0.15 - Complete Game Logic Restoration";
+const SERVER_VERSION = "4.1.0 - Full Game Logic Port";
 console.log(`SLUFF SERVER (${SERVER_VERSION}): Initializing...`);
 
 const io = new Server(server, {
@@ -55,7 +55,8 @@ function getInitialGameData(tableId) {
         state: "Waiting for Players",
         players: {}, // maps playerId -> { playerName, socketId, isSpectator, disconnected }
         playerOrderActive: [],
-        dealer: null,
+        dealer: null, // This will be a playerId
+        dealerOfRoundSocketId: null, // Store the socketId of the dealer for the round for next-round trigger
         hands: {},
         widow: [],
         originalDealtWidow: [],
@@ -133,7 +134,9 @@ function resetTable(tableId, keepPlayersAsSpectators = true) {
             const playerInfo = players[playerId];
             if (playerInfo) {
                 tables[tableId].players[playerId] = { playerName: playerInfo.playerName, socketId: playerInfo.socketId, isSpectator: true, disconnected: playerInfo.disconnected };
+                // Keep scores for players who were at the table
                 if(originalScores[playerInfo.playerName] !== undefined) tables[tableId].scores[playerInfo.playerName] = originalScores[playerInfo.playerName];
+                 else tables[tableId].scores[playerInfo.playerName] = 120; // If they had no score, reset to 120
                 playerInfo.tableId = tableId;
             }
         }
@@ -151,7 +154,7 @@ function initializeNewRoundState(table) {
         trickLeaderName: null, capturedTricks: {}, roundSummary: null, revealedWidowForFrog: [],
         lastCompletedTrick: null, playersWhoPassedThisRound: [], insurance: getInitialInsuranceState()
     });
-    const activePlayerNames = Object.values(table.players).filter(p => !p.isSpectator).map(p => p.playerName);
+    const activePlayerNames = table.playerOrderActive;
     activePlayerNames.forEach(pName => { if (pName && table.scores[pName] !== undefined) table.capturedTricks[pName] = []; });
 }
 
@@ -165,11 +168,18 @@ function transitionToPlayingPhase(table) {
     table.trickLeaderName = table.bidWinnerInfo.playerName;
     table.trickTurnPlayerName = table.bidWinnerInfo.playerName;
     
+    // --- PORTED INSURANCE LOGIC ---
     if (table.playerMode === 3 && table.bidWinnerInfo.bid !== "Frog") {
         table.insurance.isActive = true;
         table.insurance.bidMultiplier = BID_MULTIPLIERS[table.bidWinnerInfo.bid];
         table.insurance.bidderPlayerName = table.bidWinnerInfo.playerName;
-        table.playerOrderActive.forEach(pName => { if(pName !== table.bidWinnerInfo.playerName) table.insurance.defenderOffers[pName] = 0; });
+        const bidderReq = 120 * table.insurance.bidMultiplier;
+        const defenderOffer = -60 * table.insurance.bidMultiplier;
+        table.insurance.bidderRequirement = bidderReq;
+        table.playerOrderActive.forEach(pName => { 
+            if(pName !== table.bidWinnerInfo.playerName) table.insurance.defenderOffers[pName] = defenderOffer; 
+        });
+        console.log(`[${table.tableId}] INSURANCE ACTIVATED for ${table.bidWinnerInfo.playerName}. Req: ${bidderReq}, Offer: ${defenderOffer}`);
     }
     emitTableUpdate(table.tableId);
 }
@@ -177,7 +187,13 @@ function transitionToPlayingPhase(table) {
 function resolveBiddingFinal(table) {
     if (!table.currentHighestBidDetails) {
         table.state = "Round Skipped";
-        // setTimeout(() => prepareNextRound(table.tableId), 5000); // Need to implement prepareNextRound
+        // --- RESTORED LOGIC: Auto-start next round after 5s ---
+        setTimeout(() => {
+            if (tables[table.tableId]?.state === "Round Skipped") {
+                 console.log(`[${table.tableId}] All players passed. Preparing next round.`);
+                 prepareNextRound(table.tableId);
+            }
+        }, 5000);
     } else {
         table.bidWinnerInfo = { ...table.currentHighestBidDetails };
         const bid = table.bidWinnerInfo.bid;
@@ -210,6 +226,7 @@ io.on("connection", (socket) => {
         players[newPlayerId] = { socketId: socket.id, playerName, tableId: null, disconnected: false };
         sockets[socket.id] = newPlayerId;
         socket.emit("assignedPlayerId", { playerId: newPlayerId, playerName });
+        emitLobbyUpdate();
     });
 
     socket.on("reconnectPlayer", ({ playerId, playerName }) => {
@@ -224,7 +241,7 @@ io.on("connection", (socket) => {
                 table.players[playerId].disconnected = false;
                 table.players[playerId].socketId = socket.id;
                 socket.join(player.tableId);
-                socket.emit("joinedTable", {tableId: player.tableId, gameState: table});
+                emitTableUpdate(player.tableId);
             } else {
                 player.tableId = null;
                 socket.emit("lobbyState", getLobbyState());
@@ -242,17 +259,25 @@ io.on("connection", (socket) => {
         if (!playerId || !players[playerId]) return;
         const oldName = players[playerId].playerName;
         players[playerId].playerName = newName;
-        socket.emit("nameChanged", { newName });
+        
         const tableId = players[playerId].tableId;
         if(tableId && tables[tableId]?.players[playerId]){
             const table = tables[tableId];
-            table.players[playerId].playerName = newName;
+            const pData = table.players[playerId];
+            if(pData) pData.playerName = newName;
+            
+            // This is complex: need to update all name references if game is running
             if (table.scores[oldName] !== undefined) {
                 table.scores[newName] = table.scores[oldName];
                 delete table.scores[oldName];
             }
+            // A full reset is safest if name changes mid-game
+            if(table.gameStarted) {
+                resetTable(tableId, true);
+            }
             emitTableUpdate(tableId);
         }
+        socket.emit("nameChanged", { newName });
         emitLobbyUpdate();
     });
 
@@ -263,9 +288,18 @@ io.on("connection", (socket) => {
         const player = players[playerId];
         const table = tables[tableId];
         if (!table) return;
-        if (player.tableId && player.tableId !== tableId) return;
+
+        // If player is already at another table, make them leave first
+        if (player.tableId && player.tableId !== tableId) {
+            const oldTable = tables[player.tableId];
+            if(oldTable && oldTable.players[playerId]){
+                delete oldTable.players[playerId];
+                socket.leave(player.tableId);
+                emitTableUpdate(player.tableId);
+            }
+        }
         
-        const activePlayers = Object.values(table.players).filter(p => !p.isSpectator);
+        const activePlayers = Object.values(table.players).filter(p => !p.isSpectator && !p.disconnected);
         const canTakeSeat = activePlayers.length < MAX_PLAYERS_PER_TABLE && !table.gameStarted;
         const joinAsSpectator = !canTakeSeat;
 
@@ -275,13 +309,11 @@ io.on("connection", (socket) => {
         
         if (!joinAsSpectator) {
              if (table.scores[player.playerName] === undefined) table.scores[player.playerName] = 120;
-             const numActivePlayers = activePlayers.length + 1;
+             const numActivePlayers = Object.values(table.players).filter(p => !p.isSpectator && !p.disconnected).length;
              if(numActivePlayers >= 3 && !table.gameStarted) {
                 table.state = "Ready to Start";
-                table.playerOrderActive = Object.keys(table.players).filter(pId => !table.players[pId].isSpectator);
              }
         }
-        socket.emit("joinedTable", {tableId, gameState: table});
         emitTableUpdate(tableId);
         emitLobbyUpdate();
     });
@@ -289,27 +321,27 @@ io.on("connection", (socket) => {
     socket.on("leaveTable", ({tableId}) => {
         const playerId = sockets[socket.id];
         if (!playerId || !players[playerId]) return;
+        
         const player = players[playerId];
         const table = tables[tableId];
         if(!table || !table.players[playerId]) return;
         
         const wasActivePlayer = !table.players[playerId].isSpectator;
-        const oldName = player.playerName;
         delete table.players[playerId];
-        delete table.scores[oldName];
         player.tableId = null;
         socket.leave(tableId);
         
         if(wasActivePlayer && table.gameStarted){
-            resetTable(tableId);
+            resetTable(tableId, true);
         } else {
-            if(Object.values(table.players).filter(p=>!p.isSpectator).length < 3) {
+            const activePlayerCount = Object.values(table.players).filter(p=>!p.isSpectator && !p.disconnected).length;
+            if(activePlayerCount < 3) {
                 table.state = "Waiting for Players";
-                table.playerOrderActive = [];
             }
             emitTableUpdate(tableId);
         }
         emitLobbyUpdate();
+        socket.emit("lobbyState", getLobbyState()); // Send lobby state to the leaving client
     });
     
     // --- Game Flow Handlers ---
@@ -321,6 +353,7 @@ io.on("connection", (socket) => {
 
         table.playerMode = activePlayerIds.length;
         table.gameStarted = true;
+        
         const shuffledPlayerIds = shuffle([...activePlayerIds]);
         table.dealer = shuffledPlayerIds[0];
 
@@ -330,7 +363,7 @@ io.on("connection", (socket) => {
              for (let i = 1; i <= 3; i++) {
                  table.playerOrderActive.push(getPlayerNameByPlayerId(shuffledPlayerIds[(dealerIndex + i) % 4], table));
              }
-        } else {
+        } else { // 3 Player Game
              table.playerOrderActive = shuffle(shuffledPlayerIds.map(id => getPlayerNameByPlayerId(id, table)));
              if(table.scores[PLACEHOLDER_ID] === undefined) table.scores[PLACEHOLDER_ID] = 120;
         }
@@ -347,10 +380,12 @@ io.on("connection", (socket) => {
         if (!table || table.state !== "Dealing Pending" || playerId !== table.dealer) return;
         
         const shuffledDeck = shuffle([...deck]);
+        const numActivePlayers = table.playerOrderActive.length;
         table.playerOrderActive.forEach((activePName, i) => {
             table.hands[activePName] = shuffledDeck.slice(i * 11, (i + 1) * 11);
         });
-        table.widow = shuffledDeck.slice(11 * 3, 11 * 3 + 3);
+        // FIXED: Use dynamic length for widow slice
+        table.widow = shuffledDeck.slice(11 * numActivePlayers, 11 * numActivePlayers + 3);
         table.originalDealtWidow = [...table.widow];
         table.state = "Bidding Phase";
         table.biddingTurnPlayerName = table.playerOrderActive[0];
@@ -388,9 +423,16 @@ io.on("connection", (socket) => {
         } else {
             table.playersWhoPassedThisRound.push(pName);
         }
-
+        
         const activeBiddersRemaining = table.playerOrderActive.filter(name => !table.playersWhoPassedThisRound.includes(name));
-        if (activeBiddersRemaining.length <= 1) {
+        let endBidding = false;
+        if(activeBiddersRemaining.length <= 1) {
+            endBidding = true;
+        } else if (table.playersWhoPassedThisRound.length === table.playerOrderActive.length) {
+            endBidding = true;
+        }
+        
+        if (endBidding) {
             table.biddingTurnPlayerName = null;
             checkForFrogUpgrade(table);
         } else {
@@ -403,8 +445,12 @@ io.on("connection", (socket) => {
                     break;
                 }
             }
-            if(nextBidderName) table.biddingTurnPlayerName = nextBidderName;
-            else checkForFrogUpgrade(table);
+            if(nextBidderName) {
+                table.biddingTurnPlayerName = nextBidderName;
+            } else {
+                // Should not happen with prior checks, but as a fallback:
+                checkForFrogUpgrade(table);
+            }
         }
         
         emitTableUpdate(tableId);
@@ -450,21 +496,282 @@ io.on("connection", (socket) => {
         transitionToPlayingPhase(table);
     });
 
+    // --- PORTED DISCONNECT, PLAY, AND SCORING LOGIC ---
+    socket.on("playCard", ({ tableId, card }) => {
+        const table = tables[tableId];
+        const playerId = sockets[socket.id];
+        const pName = getPlayerNameByPlayerId(playerId, table);
+
+        if (!pName || table.state !== "Playing Phase" || pName !== table.trickTurnPlayerName) return socket.emit("error", "Invalid play action.");
+        
+        const hand = table.hands[pName];
+        if (!hand || !hand.includes(card)) return socket.emit("error", "Card not in hand.");
+        
+        const isLeading = table.currentTrickCards.length === 0;
+        const playedSuit = getSuit(card);
+
+        if (isLeading) {
+            const isHandAllTrump = hand.every(c => getSuit(c) === table.trumpSuit);
+            if (playedSuit === table.trumpSuit && !table.trumpBroken && !isHandAllTrump) return socket.emit("error", "Cannot lead trump if not broken (unless hand is all trump).");
+        } else {
+            const leadCardSuit = table.leadSuitCurrentTrick;
+            const hasLeadSuit = hand.some(c => getSuit(c) === leadCardSuit);
+            if (playedSuit !== leadCardSuit && hasLeadSuit) return socket.emit("error", `Must follow ${SUITS[leadCardSuit]}.`);
+        }
+        
+        table.hands[pName] = hand.filter(c => c !== card);
+        table.currentTrickCards.push({ playerId, playerName: pName, card });
+        
+        if (isLeading) table.leadSuitCurrentTrick = playedSuit;
+        if (playedSuit === table.trumpSuit) table.trumpBroken = true;
+        
+        const expectedCardsInTrick = table.playerOrderActive.length;
+        if (table.currentTrickCards.length === expectedCardsInTrick) {
+            const winnerNameOfTrick = determineTrickWinner(table.currentTrickCards, table.leadSuitCurrentTrick, table.trumpSuit);
+            const currentTrickNumber = table.tricksPlayedCount + 1;
+            
+            if (winnerNameOfTrick) {
+                if (!table.capturedTricks[winnerNameOfTrick]) table.capturedTricks[winnerNameOfTrick] = [];
+                table.capturedTricks[winnerNameOfTrick].push(table.currentTrickCards.map(p => p.card));
+            }
+            
+            table.lastCompletedTrick = { cards: [...table.currentTrickCards], winnerName: winnerNameOfTrick, leadSuit: table.leadSuitCurrentTrick, trickNumber: currentTrickNumber };
+            table.tricksPlayedCount++;
+            table.trickLeaderName = winnerNameOfTrick;
+            
+            if (table.tricksPlayedCount === 11) {
+                calculateRoundScores(tableId);
+            } else {
+                table.state = "TrickCompleteLinger";
+                emitTableUpdate(tableId);
+                setTimeout(() => {
+                    const currentTable = tables[tableId];
+                    if (currentTable.state === "TrickCompleteLinger") {
+                        currentTable.currentTrickCards = [];
+                        currentTable.leadSuitCurrentTrick = null;
+                        currentTable.trickTurnPlayerName = winnerNameOfTrick;
+                        currentTable.state = "Playing Phase";
+                        emitTableUpdate(tableId);
+                    }
+                }, 2000);
+            }
+        } else {
+            const currentTurnPlayerIndex = table.playerOrderActive.indexOf(pName);
+            table.trickTurnPlayerName = table.playerOrderActive[(currentTurnPlayerIndex + 1) % expectedCardsInTrick];
+            emitTableUpdate(tableId);
+        }
+    });
+
+    socket.on("requestNextRound", ({ tableId }) => {
+        const table = tables[tableId];
+        const playerId = sockets[socket.id];
+        if (table.state === "Awaiting Next Round Trigger" && table.roundSummary && playerId === table.dealer) {
+            prepareNextRound(tableId);
+        } else {
+            socket.emit("error", "Cannot start next round: Not the correct state or you are not the dealer.");
+        }
+    });
+    
+    socket.on("resetGame", ({ tableId }) => {
+        resetTable(tableId, true);
+    });
+
     socket.on("disconnect", (reason) => {
         const playerId = sockets[socket.id];
         if (playerId && players[playerId]) {
             const player = players[playerId];
             player.disconnected = true;
             if (player.tableId && tables[player.tableId]?.players[playerId]) {
-                tables[player.tableId].players[playerId].disconnected = true;
-                emitTableUpdate(player.tableId);
-                emitLobbyUpdate();
+                const table = tables[player.tableId];
+                table.players[playerId].disconnected = true;
+
+                // If a player disconnects mid-game, it often ruins the round. Resetting is safest.
+                if(table.gameStarted && table.state !== "Waiting for Players" && table.state !== "Ready to Start"){
+                    console.log(`[${player.tableId}] Player ${player.playerName} disconnected mid-game. Resetting table.`);
+                    resetTable(player.tableId, true);
+                } else {
+                   emitTableUpdate(player.tableId);
+                }
             }
+            emitLobbyUpdate();
             delete sockets[socket.id];
         }
     });
-
 });
+
+// --- PORTED: Core Game Logic Functions ---
+
+function determineTrickWinner(trickCards, leadSuit, trumpSuit) {
+    let winningPlay = null;
+    let highestTrumpPlay = null;
+    let highestLeadSuitPlay = null;
+
+    for (const play of trickCards) {
+        const cardSuit = getSuit(play.card);
+        const cardRankIndex = RANKS_ORDER.indexOf(getRank(play.card));
+        
+        if (cardSuit === trumpSuit) {
+            if (!highestTrumpPlay || cardRankIndex > RANKS_ORDER.indexOf(getRank(highestTrumpPlay.card))) {
+                highestTrumpPlay = play;
+            }
+        } else if (cardSuit === leadSuit) {
+            if (!highestLeadSuitPlay || cardRankIndex > RANKS_ORDER.indexOf(getRank(highestLeadSuitPlay.card))) {
+                highestLeadSuitPlay = play;
+            }
+        }
+    }
+    
+    winningPlay = highestTrumpPlay || highestLeadSuitPlay;
+    return winningPlay ? winningPlay.playerName : null;
+}
+
+function calculateRoundScores(tableId) {
+    const table = tables[tableId];
+    if (!table || !table.bidWinnerInfo) return;
+
+    const { bidWinnerInfo, playerOrderActive, playerMode, scores, capturedTricks, widowDiscardsForFrogBidder, originalDealtWidow, trickLeaderName } = table;
+    const bidWinnerName = bidWinnerInfo.playerName;
+    const bidType = bidWinnerInfo.bid;
+    const currentBidMultiplier = BID_MULTIPLIERS[bidType];
+
+    let bidderTotalCardPoints = 0;
+    let defendersTotalCardPoints = 0;
+    let awardedWidowInfo = { cards: [], points: 0, awardedTo: null };
+
+    // 1. Calculate widow points
+    if (bidType === "Frog") {
+        awardedWidowInfo.cards = [...widowDiscardsForFrogBidder];
+        awardedWidowInfo.points = calculateCardPoints(awardedWidowInfo.cards);
+        bidderTotalCardPoints += awardedWidowInfo.points;
+        awardedWidowInfo.awardedTo = bidWinnerName;
+    } else if (bidType === "Solo") {
+        awardedWidowInfo.cards = [...originalDealtWidow];
+        awardedWidowInfo.points = calculateCardPoints(awardedWidowInfo.cards);
+        bidderTotalCardPoints += awardedWidowInfo.points;
+        awardedWidowInfo.awardedTo = bidWinnerName;
+    } else if (bidType === "Heart Solo") {
+        awardedWidowInfo.cards = [...originalDealtWidow];
+        awardedWidowInfo.points = calculateCardPoints(awardedWidowInfo.cards);
+        if (trickLeaderName === bidWinnerName) {
+            bidderTotalCardPoints += awardedWidowInfo.points;
+            awardedWidowInfo.awardedTo = bidWinnerName;
+        } else {
+            defendersTotalCardPoints += awardedWidowInfo.points;
+            awardedWidowInfo.awardedTo = trickLeaderName;
+        }
+    }
+
+    // 2. Tally points from captured tricks
+    playerOrderActive.forEach(pName => {
+        const playerTrickPoints = (capturedTricks[pName] || []).flat().reduce((sum, card) => sum + calculateCardPoints([card]), 0);
+        if (pName === bidWinnerName) {
+            bidderTotalCardPoints += playerTrickPoints;
+        } else {
+            defendersTotalCardPoints += playerTrickPoints;
+        }
+    });
+    
+    const bidMadeSuccessfully = bidderTotalCardPoints > 60;
+    const scoreDifferenceFrom60 = bidderTotalCardPoints - 60;
+    const exchangeValue = Math.abs(scoreDifferenceFrom60) * currentBidMultiplier;
+    
+    const scoresBeforeExchange = JSON.parse(JSON.stringify(scores));
+    let roundMessage = "";
+
+    // 3. Exchange game points
+    if (scoreDifferenceFrom60 === 0) {
+        roundMessage = `${bidWinnerName} scored exactly 60. No points exchanged.`;
+    } else if (bidMadeSuccessfully) {
+        let totalPointsGained = 0;
+        playerOrderActive.forEach(pName => {
+            if (pName !== bidWinnerName) {
+                scores[pName] -= exchangeValue;
+                totalPointsGained += exchangeValue;
+            }
+        });
+        scores[bidWinnerName] += totalPointsGained;
+        roundMessage = `${bidWinnerName} succeeded! Gains ${totalPointsGained} points.`;
+    } else { // Bid failed
+        let totalPointsLost = 0;
+        playerOrderActive.forEach(pName => {
+            if (pName !== bidWinnerName) {
+                scores[pName] += exchangeValue;
+                totalPointsLost += exchangeValue;
+            }
+        });
+         if (playerMode === 3) {
+            scores[PLACEHOLDER_ID] += exchangeValue;
+            totalPointsLost += exchangeValue;
+        } else if (playerMode === 4) {
+            const dealerName = getPlayerNameByPlayerId(table.dealer, table);
+            if (dealerName && !playerOrderActive.includes(dealerName)) {
+                scores[dealerName] += exchangeValue;
+                totalPointsLost += exchangeValue;
+            }
+        }
+        scores[bidWinnerName] -= totalPointsLost;
+        roundMessage = `${bidWinnerName} failed. Loses ${totalPointsLost} points.`;
+    }
+
+    // 4. Check for game over
+    let isGameOver = false;
+    let gameWinner = null;
+    const finalPlayerScores = Object.entries(scores).filter(([key]) => key !== PLACEHOLDER_ID);
+    if(finalPlayerScores.some(([,score]) => score <= 0)) {
+        isGameOver = true;
+        const highestScoringPlayer = finalPlayerScores.sort((a,b) => b[1] - a[1])[0];
+        gameWinner = highestScoringPlayer[0];
+        roundMessage += ` GAME OVER! Winner: ${gameWinner} with ${highestScoringPlayer[1]} points.`;
+        table.state = "Game Over";
+    } else {
+        table.state = "Awaiting Next Round Trigger";
+    }
+
+    table.roundSummary = {
+        bidWinnerName, bidType, trumpSuit: table.trumpSuit,
+        bidderCardPoints: bidderTotalCardPoints, defenderCardPoints: defendersTotalCardPoints,
+        awardedWidowInfo, bidMadeSuccessfully,
+        scoresBeforeExchange, finalScores: scores,
+        isGameOver, gameWinner, message: roundMessage,
+    };
+    
+    emitTableUpdate(tableId);
+}
+
+function prepareNextRound(tableId) {
+    const table = tables[tableId];
+    if (!table || !table.gameStarted) return;
+    
+    const activePlayerIds = Object.keys(table.players).filter(pId => !table.players[pId].isSpectator && !table.players[pId].disconnected);
+    if (activePlayerIds.length !== table.playerMode) {
+        console.log(`[${tableId}] Player count changed. Resetting table.`);
+        resetTable(tableId, true);
+        return;
+    }
+    
+    const allPlayerIdsInOrder = [table.dealer, ...activePlayerIds.filter(id => id !== table.dealer)];
+    const lastDealerIndex = allPlayerIdsInOrder.indexOf(table.dealer);
+    const nextDealerId = allPlayerIdsInOrder[(lastDealerIndex + 1) % allPlayerIdsInOrder.length];
+    
+    table.dealer = nextDealerId;
+
+    if(table.playerMode === 4){
+         table.playerOrderActive = [];
+         const dealerIndex = activePlayerIds.indexOf(table.dealer);
+         const playerIdsForRound = [...activePlayerIds]; // create a stable order
+         for (let i = 1; i <= 3; i++) {
+             table.playerOrderActive.push(getPlayerNameByPlayerId(playerIdsForRound[(dealerIndex + i) % 4], table));
+         }
+    } else { // 3 Player Game
+         const otherPlayers = activePlayerIds.filter(id => id !== table.dealer);
+         table.playerOrderActive = shuffle(otherPlayers.map(id => getPlayerNameByPlayerId(id, table)));
+    }
+    
+    initializeNewRoundState(table);
+    table.state = "Dealing Pending";
+    emitTableUpdate(tableId);
+}
+
 
 // --- Server Listening ---
 const PORT = process.env.PORT || 3000;
