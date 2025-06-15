@@ -9,7 +9,7 @@ const { v4: uuidv4 } = require('uuid');
 const app = express();
 const server = http.createServer(app);
 
-const SERVER_VERSION = "4.0.14 - Full Game Logic Restoration";
+const SERVER_VERSION = "4.0.15 - Complete Game Logic Restoration";
 console.log(`SLUFF SERVER (${SERVER_VERSION}): Initializing...`);
 
 const io = new Server(server, {
@@ -117,6 +117,7 @@ function getPlayerIdByName(playerName, table) { if(!table || !playerName) return
 function getSuit(cardStr) { return cardStr ? cardStr.slice(-1) : null; }
 function getRank(cardStr) { return cardStr ? cardStr.slice(0, -1) : null; }
 function shuffle(array) { let currentIndex = array.length, randomIndex; while (currentIndex !== 0) { randomIndex = Math.floor(Math.random() * currentIndex); currentIndex--; [array[currentIndex], array[randomIndex]] = [array[randomIndex], array[currentIndex]]; } return array; }
+function calculateCardPoints(cardsArray) { if (!cardsArray || cardsArray.length === 0) return 0; return cardsArray.reduce((sum, cardString) => { const rank = getRank(cardString); return sum + (CARD_POINT_VALUES[rank] || 0); }, 0); }
 
 // --- Game Logic Functions (Adapted for multi-table) ---
 
@@ -124,6 +125,7 @@ function resetTable(tableId, keepPlayersAsSpectators = true) {
     if (!tables[tableId]) return;
     const originalPlayers = { ...tables[tableId].players };
     const originalScores = { ...tables[tableId].scores };
+
     tables[tableId] = getInitialGameData(tableId);
 
     if (keepPlayersAsSpectators) {
@@ -243,7 +245,6 @@ io.on("connection", (socket) => {
         socket.emit("nameChanged", { newName });
         const tableId = players[playerId].tableId;
         if(tableId && tables[tableId]?.players[playerId]){
-            // This part needs to be more robust, handling name changes in all game state properties
             const table = tables[tableId];
             table.players[playerId].playerName = newName;
             if (table.scores[oldName] !== undefined) {
@@ -409,21 +410,6 @@ io.on("connection", (socket) => {
         emitTableUpdate(tableId);
     });
 
-    socket.on("disconnect", (reason) => {
-        const playerId = sockets[socket.id];
-        if (playerId && players[playerId]) {
-            const player = players[playerId];
-            player.disconnected = true;
-            if (player.tableId && tables[player.tableId]?.players[playerId]) {
-                tables[player.tableId].players[playerId].disconnected = true;
-                emitTableUpdate(player.tableId);
-                emitLobbyUpdate();
-            }
-            delete sockets[socket.id];
-        }
-    });
-
-    // --- The rest of the game logic handlers ---
     socket.on("frogBidderConfirmsWidowTake", ({ tableId }) => {
         const table = tables[tableId];
         const playerId = sockets[socket.id];
@@ -463,6 +449,21 @@ io.on("connection", (socket) => {
         table.trumpSuit = suit;
         transitionToPlayingPhase(table);
     });
+
+    socket.on("disconnect", (reason) => {
+        const playerId = sockets[socket.id];
+        if (playerId && players[playerId]) {
+            const player = players[playerId];
+            player.disconnected = true;
+            if (player.tableId && tables[player.tableId]?.players[playerId]) {
+                tables[player.tableId].players[playerId].disconnected = true;
+                emitTableUpdate(player.tableId);
+                emitLobbyUpdate();
+            }
+            delete sockets[socket.id];
+        }
+    });
+
 });
 
 // --- Server Listening ---
