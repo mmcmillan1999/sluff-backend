@@ -9,7 +9,7 @@ const { v4: uuidv4 } = require('uuid');
 const app = express();
 const server = http.createServer(app);
 
-const SERVER_VERSION = "4.0.13 - Full Game Logic Restoration";
+const SERVER_VERSION = "4.0.14 - Full Game Logic Restoration";
 console.log(`SLUFF SERVER (${SERVER_VERSION}): Initializing...`);
 
 const io = new Server(server, {
@@ -110,103 +110,47 @@ function getLobbyState() {
     }));
 }
 
-function emitLobbyUpdate() {
-    io.emit("lobbyState", getLobbyState());
-}
-
-function emitTableUpdate(tableId) {
-    if (tables[tableId]) {
-        io.to(tableId).emit("gameState", tables[tableId]);
-    }
-}
-
-function getPlayerNameByPlayerId(playerId, table) {
-    return table?.players[playerId]?.playerName || playerId;
-}
-
-function getPlayerIdByName(playerName, table) {
-    if(!table || !playerName) return null;
-    for(const pid in table.players){
-        if(table.players[pid].playerName === playerName) return pid;
-    }
-    return null;
-}
-
+function emitLobbyUpdate() { io.emit("lobbyState", getLobbyState()); }
+function emitTableUpdate(tableId) { if (tables[tableId]) io.to(tableId).emit("gameState", tables[tableId]); }
+function getPlayerNameByPlayerId(playerId, table) { return table?.players[playerId]?.playerName || playerId; }
+function getPlayerIdByName(playerName, table) { if(!table || !playerName) return null; for(const pid in table.players){ if(table.players[pid].playerName === playerName) return pid; } return null; }
 function getSuit(cardStr) { return cardStr ? cardStr.slice(-1) : null; }
 function getRank(cardStr) { return cardStr ? cardStr.slice(0, -1) : null; }
-
-function shuffle(array) {
-  let currentIndex = array.length,  randomIndex;
-  while (currentIndex !== 0) {
-    randomIndex = Math.floor(Math.random() * currentIndex);
-    currentIndex--;
-    [array[currentIndex], array[randomIndex]] = [array[randomIndex], array[currentIndex]];
-  }
-  return array;
-}
-
-function calculateCardPoints(cardsArray) {
-    if (!cardsArray || cardsArray.length === 0) return 0;
-    return cardsArray.reduce((sum, cardString) => {
-        const rank = getRank(cardString);
-        return sum + (CARD_POINT_VALUES[rank] || 0);
-    }, 0);
-}
-
+function shuffle(array) { let currentIndex = array.length, randomIndex; while (currentIndex !== 0) { randomIndex = Math.floor(Math.random() * currentIndex); currentIndex--; [array[currentIndex], array[randomIndex]] = [array[randomIndex], array[currentIndex]]; } return array; }
 
 // --- Game Logic Functions (Adapted for multi-table) ---
 
 function resetTable(tableId, keepPlayersAsSpectators = true) {
-    console.log(`[${SERVER_VERSION}] Resetting table: ${tableId}`);
     if (!tables[tableId]) return;
-
     const originalPlayers = { ...tables[tableId].players };
     const originalScores = { ...tables[tableId].scores };
-
     tables[tableId] = getInitialGameData(tableId);
 
     if (keepPlayersAsSpectators) {
         for (const playerId in originalPlayers) {
-            const playerInfo = players[playerId]; // Get master player info
+            const playerInfo = players[playerId];
             if (playerInfo) {
-                tables[tableId].players[playerId] = {
-                    playerName: playerInfo.playerName,
-                    socketId: playerInfo.socketId,
-                    isSpectator: true,
-                    disconnected: playerInfo.disconnected
-                };
-                if(originalScores[playerInfo.playerName] !== undefined){
-                   tables[tableId].scores[playerInfo.playerName] = originalScores[playerInfo.playerName];
-                }
+                tables[tableId].players[playerId] = { playerName: playerInfo.playerName, socketId: playerInfo.socketId, isSpectator: true, disconnected: playerInfo.disconnected };
+                if(originalScores[playerInfo.playerName] !== undefined) tables[tableId].scores[playerInfo.playerName] = originalScores[playerInfo.playerName];
                 playerInfo.tableId = tableId;
             }
         }
     }
-    
     emitTableUpdate(tableId);
     emitLobbyUpdate();
 }
 
 function initializeNewRoundState(table) {
-    table.hands = {}; table.widow = []; table.originalDealtWidow = [];
-    table.widowDiscardsForFrogBidder = []; table.bidsThisRound = [];
-    table.currentHighestBidDetails = null; table.trumpSuit = null;
-    table.bidWinnerInfo = null; table.biddingTurnPlayerName = null;
-    table.bidsMadeCount = 0; table.originalFrogBidderId = null;
-    table.soloBidMadeAfterFrog = false; table.currentTrickCards = [];
-    table.trickTurnPlayerName = null; table.tricksPlayedCount = 0;
-    table.leadSuitCurrentTrick = null; table.trumpBroken = false;
-    table.trickLeaderName = null; table.capturedTricks = {};
-    table.roundSummary = null; table.revealedWidowForFrog = [];
-    table.lastCompletedTrick = null; table.playersWhoPassedThisRound = [];
-    table.insurance = getInitialInsuranceState();
-
-    const activePlayerNames = Object.values(table.players).filter(p => !p.isSpectator).map(p => p.playerName);
-    activePlayerNames.forEach(pName => {
-        if (pName && table.scores[pName] !== undefined) {
-            table.capturedTricks[pName] = [];
-        }
+    Object.assign(table, {
+        hands: {}, widow: [], originalDealtWidow: [], widowDiscardsForFrogBidder: [], bidsThisRound: [],
+        currentHighestBidDetails: null, trumpSuit: null, bidWinnerInfo: null, biddingTurnPlayerName: null,
+        bidsMadeCount: 0, originalFrogBidderId: null, soloBidMadeAfterFrog: false, currentTrickCards: [],
+        trickTurnPlayerName: null, tricksPlayedCount: 0, leadSuitCurrentTrick: null, trumpBroken: false,
+        trickLeaderName: null, capturedTricks: {}, roundSummary: null, revealedWidowForFrog: [],
+        lastCompletedTrick: null, playersWhoPassedThisRound: [], insurance: getInitialInsuranceState()
     });
+    const activePlayerNames = Object.values(table.players).filter(p => !p.isSpectator).map(p => p.playerName);
+    activePlayerNames.forEach(pName => { if (pName && table.scores[pName] !== undefined) table.capturedTricks[pName] = []; });
 }
 
 function transitionToPlayingPhase(table) {
@@ -219,37 +163,26 @@ function transitionToPlayingPhase(table) {
     table.trickLeaderName = table.bidWinnerInfo.playerName;
     table.trickTurnPlayerName = table.bidWinnerInfo.playerName;
     
-    // Insurance logic for 3-player mode
     if (table.playerMode === 3 && table.bidWinnerInfo.bid !== "Frog") {
         table.insurance.isActive = true;
         table.insurance.bidMultiplier = BID_MULTIPLIERS[table.bidWinnerInfo.bid];
         table.insurance.bidderPlayerName = table.bidWinnerInfo.playerName;
-        //Initialize defender offers
-        table.playerOrderActive.forEach(pName => {
-            if(pName !== table.bidWinnerInfo.playerName) table.insurance.defenderOffers[pName] = 0;
-        });
+        table.playerOrderActive.forEach(pName => { if(pName !== table.bidWinnerInfo.playerName) table.insurance.defenderOffers[pName] = 0; });
     }
-    
     emitTableUpdate(table.tableId);
 }
 
 function resolveBiddingFinal(table) {
     if (!table.currentHighestBidDetails) {
         table.state = "Round Skipped";
-        // setTimeout(() => prepareNextRound(table.tableId), 5000); // Placeholder for next round logic
+        // setTimeout(() => prepareNextRound(table.tableId), 5000); // Need to implement prepareNextRound
     } else {
         table.bidWinnerInfo = { ...table.currentHighestBidDetails };
         const bid = table.bidWinnerInfo.bid;
         
-        if (bid === "Frog") {
-            table.trumpSuit = "H";
-            table.state = "FrogBidderConfirmWidow";
-        } else if (bid === "Heart Solo") {
-            table.trumpSuit = "H";
-            transitionToPlayingPhase(table);
-        } else if (bid === "Solo") {
-            table.state = "Trump Selection";
-        }
+        if (bid === "Frog") { table.trumpSuit = "H"; table.state = "FrogBidderConfirmWidow"; } 
+        else if (bid === "Heart Solo") { table.trumpSuit = "H"; transitionToPlayingPhase(table); } 
+        else if (bid === "Solo") { table.state = "Trump Selection"; }
     }
     table.originalFrogBidderId = null;
     table.soloBidMadeAfterFrog = false;
@@ -263,12 +196,66 @@ function checkForFrogUpgrade(table) {
     } else {
         resolveBiddingFinal(table);
     }
+    emitTableUpdate(table.tableId);
 }
 
 // --- Socket.IO Connection Handling ---
 io.on("connection", (socket) => {
-    // ... (login, reconnect, changeName logic remains the same) ...
+    
+    // --- User & Lobby Management ---
+    socket.on("login", ({ playerName }) => {
+        const newPlayerId = uuidv4();
+        players[newPlayerId] = { socketId: socket.id, playerName, tableId: null, disconnected: false };
+        sockets[socket.id] = newPlayerId;
+        socket.emit("assignedPlayerId", { playerId: newPlayerId, playerName });
+    });
 
+    socket.on("reconnectPlayer", ({ playerId, playerName }) => {
+        sockets[socket.id] = playerId;
+        if (players[playerId]) {
+            const player = players[playerId];
+            player.socketId = socket.id;
+            player.disconnected = false;
+            
+            if (player.tableId && tables[player.tableId]?.players[playerId]) {
+                const table = tables[player.tableId];
+                table.players[playerId].disconnected = false;
+                table.players[playerId].socketId = socket.id;
+                socket.join(player.tableId);
+                socket.emit("joinedTable", {tableId: player.tableId, gameState: table});
+            } else {
+                player.tableId = null;
+                socket.emit("lobbyState", getLobbyState());
+            }
+            socket.emit("assignedPlayerId", { playerId, playerName: player.playerName });
+        } else {
+            players[playerId] = { socketId: socket.id, playerName, tableId: null, disconnected: false };
+            socket.emit("assignedPlayerId", { playerId, playerName });
+        }
+        emitLobbyUpdate();
+    });
+
+    socket.on('changeName', ({ newName }) => {
+        const playerId = sockets[socket.id];
+        if (!playerId || !players[playerId]) return;
+        const oldName = players[playerId].playerName;
+        players[playerId].playerName = newName;
+        socket.emit("nameChanged", { newName });
+        const tableId = players[playerId].tableId;
+        if(tableId && tables[tableId]?.players[playerId]){
+            // This part needs to be more robust, handling name changes in all game state properties
+            const table = tables[tableId];
+            table.players[playerId].playerName = newName;
+            if (table.scores[oldName] !== undefined) {
+                table.scores[newName] = table.scores[oldName];
+                delete table.scores[oldName];
+            }
+            emitTableUpdate(tableId);
+        }
+        emitLobbyUpdate();
+    });
+
+    // --- Table Management ---
     socket.on("joinTable", ({ tableId }) => {
         const playerId = sockets[socket.id];
         if (!playerId || !players[playerId]) return;
@@ -282,12 +269,7 @@ io.on("connection", (socket) => {
         const joinAsSpectator = !canTakeSeat;
 
         player.tableId = tableId;
-        table.players[playerId] = {
-            playerName: player.playerName,
-            socketId: socket.id,
-            isSpectator: joinAsSpectator,
-            disconnected: false
-        };
+        table.players[playerId] = { playerName: player.playerName, socketId: socket.id, isSpectator: joinAsSpectator, disconnected: false };
         socket.join(tableId);
         
         if (!joinAsSpectator) {
@@ -313,7 +295,7 @@ io.on("connection", (socket) => {
         const wasActivePlayer = !table.players[playerId].isSpectator;
         const oldName = player.playerName;
         delete table.players[playerId];
-        delete table.scores[oldName]; // Remove score on leaving
+        delete table.scores[oldName];
         player.tableId = null;
         socket.leave(tableId);
         
@@ -347,7 +329,7 @@ io.on("connection", (socket) => {
              for (let i = 1; i <= 3; i++) {
                  table.playerOrderActive.push(getPlayerNameByPlayerId(shuffledPlayerIds[(dealerIndex + i) % 4], table));
              }
-        } else { // 3 player game
+        } else {
              table.playerOrderActive = shuffle(shuffledPlayerIds.map(id => getPlayerNameByPlayerId(id, table)));
              if(table.scores[PLACEHOLDER_ID] === undefined) table.scores[PLACEHOLDER_ID] = 120;
         }
@@ -386,9 +368,7 @@ io.on("connection", (socket) => {
 
         if (table.state === "Awaiting Frog Upgrade Decision") {
             if (playerId !== table.originalFrogBidderId || (bid !== "Heart Solo" && bid !== "Pass")) return;
-            if (bid === "Heart Solo") {
-                table.currentHighestBidDetails = { playerId, playerName: pName, bid: "Heart Solo" };
-            }
+            if (bid === "Heart Solo") table.currentHighestBidDetails = { playerId, playerName: pName, bid: "Heart Solo" };
             table.biddingTurnPlayerName = null;
             resolveBiddingFinal(table);
             return;
@@ -409,10 +389,7 @@ io.on("connection", (socket) => {
         }
 
         const activeBiddersRemaining = table.playerOrderActive.filter(name => !table.playersWhoPassedThisRound.includes(name));
-        let endBidding = false;
-        if (activeBiddersRemaining.length <= 1) endBidding = true;
-
-        if (endBidding) {
+        if (activeBiddersRemaining.length <= 1) {
             table.biddingTurnPlayerName = null;
             checkForFrogUpgrade(table);
         } else {
@@ -425,11 +402,8 @@ io.on("connection", (socket) => {
                     break;
                 }
             }
-            if(nextBidderName) {
-                table.biddingTurnPlayerName = nextBidderName;
-            } else {
-                checkForFrogUpgrade(table);
-            }
+            if(nextBidderName) table.biddingTurnPlayerName = nextBidderName;
+            else checkForFrogUpgrade(table);
         }
         
         emitTableUpdate(tableId);
@@ -449,10 +423,46 @@ io.on("connection", (socket) => {
         }
     });
 
-    // --- All other game event handlers from v4.0.7 go here ---
-    // Example: frogBidderConfirmsWidowTake, chooseTrump, playCard, etc.
-    // They will all follow the pattern of getting the tableId and playerId
-    // and operating on the correct table object.
+    // --- The rest of the game logic handlers ---
+    socket.on("frogBidderConfirmsWidowTake", ({ tableId }) => {
+        const table = tables[tableId];
+        const playerId = sockets[socket.id];
+        if(!table || table.state !== "FrogBidderConfirmWidow" || table.bidWinnerInfo.playerId !== playerId) return;
+
+        table.state = "Frog Widow Exchange";
+        table.revealedWidowForFrog = [...table.widow];
+
+        const winnerSocket = io.sockets.sockets.get(table.players[playerId].socketId);
+        if(winnerSocket) winnerSocket.emit("promptFrogWidowExchange", { widow: table.widow });
+        
+        emitTableUpdate(tableId);
+    });
+
+    socket.on("submitFrogDiscards", ({ tableId, discards }) => {
+        const table = tables[tableId];
+        const playerId = sockets[socket.id];
+        if(!table || table.state !== "Frog Widow Exchange" || table.bidWinnerInfo.playerId !== playerId) return;
+        if(!Array.isArray(discards) || discards.length !== 3) return;
+
+        const pName = getPlayerNameByPlayerId(playerId, table);
+        const combinedHand = [...table.hands[pName], ...table.widow];
+        if(!discards.every(card => combinedHand.includes(card))) return;
+
+        table.widowDiscardsForFrogBidder = discards;
+        table.hands[pName] = combinedHand.filter(card => !discards.includes(card));
+        
+        transitionToPlayingPhase(table);
+    });
+
+    socket.on("chooseTrump", ({ tableId, suit }) => {
+        const table = tables[tableId];
+        const playerId = sockets[socket.id];
+        if(!table || table.state !== "Trump Selection" || table.bidWinnerInfo.playerId !== playerId) return;
+        if(!["S", "C", "D"].includes(suit)) return;
+        
+        table.trumpSuit = suit;
+        transitionToPlayingPhase(table);
+    });
 });
 
 // --- Server Listening ---
