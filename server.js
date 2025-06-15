@@ -1,4 +1,4 @@
-// --- Backend/server.js (v4.1.1) ---
+// --- Backend/server.js (v4.1.2) ---
 require("dotenv").config();
 const http = require("http");
 const { Server } = require("socket.io");
@@ -10,7 +10,7 @@ const app = express();
 const server = http.createServer(app);
 
 // --- VERSION UPDATED ---
-const SERVER_VERSION = "4.1.1 - Fixed Join Table Event";
+const SERVER_VERSION = "4.1.2 - Fixed 3-Player Start Logic";
 console.log(`SLUFF SERVER (${SERVER_VERSION}): Initializing...`);
 
 const io = new Server(server, {
@@ -132,7 +132,7 @@ function resetTable(tableId, keepPlayersAsSpectators = true) {
     if (keepPlayersAsSpectators) {
         for (const playerId in originalPlayers) {
             const playerInfo = players[playerId];
-            if (playerInfo && playerInfo.tableId === tableId) { // Ensure we only re-add players from that table
+            if (playerInfo && playerInfo.tableId === tableId) {
                 tables[tableId].players[playerId] = { playerName: playerInfo.playerName, socketId: playerInfo.socketId, isSpectator: true, disconnected: playerInfo.disconnected };
                 tables[tableId].scores[playerInfo.playerName] = originalScores[playerInfo.playerName] ?? 120;
             }
@@ -305,9 +305,7 @@ io.on("connection", (socket) => {
              }
         }
         
-        // --- FIX: Added missing event to tell the joining client to switch views. ---
         socket.emit("joinedTable", {tableId, gameState: table});
-
         emitTableUpdate(tableId);
         emitLobbyUpdate();
     });
@@ -350,18 +348,20 @@ io.on("connection", (socket) => {
         
         const shuffledPlayerIds = shuffle([...activePlayerIds]);
         table.dealer = shuffledPlayerIds[0];
+        table.playerOrderActive = [];
 
-        if(table.playerMode === 4){
-             table.playerOrderActive = [];
+        if (table.playerMode === 4) {
              const dealerIndex = shuffledPlayerIds.indexOf(table.dealer);
              for (let i = 1; i <= 3; i++) {
                  table.playerOrderActive.push(getPlayerNameByPlayerId(shuffledPlayerIds[(dealerIndex + i) % 4], table));
              }
-        } else { // 3 Player Game
-             table.playerOrderActive = [];
-             const activePlayerNames = shuffle(activePlayerIds.map(id => getPlayerNameByPlayerId(id, table)))
-             table.playerOrderActive.push(...activePlayerNames);
-             if(table.scores[PLACEHOLDER_ID] === undefined) table.scores[PLACEHOLDER_ID] = 120;
+        } else { // --- FIX: 3-Player game start logic ---
+             const dealerIndex = shuffledPlayerIds.indexOf(table.dealer);
+             for (let i = 1; i <= 3; i++) { // Bidding order starts to the left of the dealer
+                const playerToPushId = shuffledPlayerIds[(dealerIndex + i) % 3];
+                table.playerOrderActive.push(getPlayerNameByPlayerId(playerToPushId, table));
+             }
+             if (table.scores[PLACEHOLDER_ID] === undefined) table.scores[PLACEHOLDER_ID] = 120;
         }
 
         initializeNewRoundState(table);
@@ -737,7 +737,6 @@ function prepareNextRound(tableId) {
         return;
     }
     
-    // Determine the full list of players involved in the rotation (active + dealer if 4p)
     const rotationPlayerIds = table.playerMode === 4 
         ? Object.keys(table.players).filter(pId => !table.players[pId].isSpectator) 
         : activePlayerIds;
@@ -746,22 +745,20 @@ function prepareNextRound(tableId) {
     const nextDealerId = rotationPlayerIds[(lastDealerIndex + 1) % rotationPlayerIds.length];
     
     table.dealer = nextDealerId;
-    
-    const playersForActiveOrder = table.playerMode === 4 
-        ? rotationPlayerIds 
-        : activePlayerIds;
-    
     table.playerOrderActive = [];
 
     if (table.playerMode === 4) {
-        const dealerIndex = playersForActiveOrder.indexOf(table.dealer);
+        const dealerIndex = rotationPlayerIds.indexOf(table.dealer);
         for (let i = 1; i <= 3; i++) {
-            const activePlayerId = playersForActiveOrder[(dealerIndex + i) % 4];
+            const activePlayerId = rotationPlayerIds[(dealerIndex + i) % 4];
             table.playerOrderActive.push(getPlayerNameByPlayerId(activePlayerId, table));
         }
     } else { // 3 Player Game
-        const activeNames = shuffle(playersForActiveOrder.map(id => getPlayerNameByPlayerId(id, table)));
-        table.playerOrderActive.push(...activeNames);
+        const dealerIndex = rotationPlayerIds.indexOf(table.dealer);
+        for (let i = 1; i <= 3; i++) {
+            const activePlayerId = rotationPlayerIds[(dealerIndex + i) % 3];
+            table.playerOrderActive.push(getPlayerNameByPlayerId(activePlayerId, table));
+        }
     }
     
     initializeNewRoundState(table);
