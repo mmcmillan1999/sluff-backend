@@ -1,4 +1,4 @@
-// --- Backend/server.js (v4.3.1) ---
+// --- Backend/server.js (v4.3.2) ---
 require("dotenv").config();
 const http = require("http");
 const { Server } = require("socket.io");
@@ -10,7 +10,7 @@ const app = express();
 const server = http.createServer(app);
 
 // --- VERSION UPDATED ---
-const SERVER_VERSION = "4.3.1 - Added Detailed Reset/Login Logging";
+const SERVER_VERSION = "4.3.2 - Fixed Bidding & Frog Discard Logic";
 console.log(`SLUFF SERVER (${SERVER_VERSION}): Initializing...`);
 
 const io = new Server(server, {
@@ -72,6 +72,7 @@ function getInitialGameData(tableId) {
         trickLeaderName: null,
         capturedTricks: {},
         roundSummary: null,
+        revealedWidowForFrog: [],
         lastCompletedTrick: null,
         playersWhoPassedThisRound: [],
         playerMode: null,
@@ -80,7 +81,6 @@ function getInitialGameData(tableId) {
 }
 
 function initializeServer() {
-    console.log("[DEBUG] Initializing server state with empty tables.");
     for (let i = 1; i <= NUM_TABLES; i++) {
         const tableId = `table-${i}`;
         tables[tableId] = getInitialGameData(tableId);
@@ -111,15 +111,13 @@ function getRank(cardStr) { return cardStr ? cardStr.slice(0, -1) : null; }
 function shuffle(array) { let currentIndex = array.length, randomIndex; while (currentIndex !== 0) { randomIndex = Math.floor(Math.random() * currentIndex); currentIndex--; [array[currentIndex], array[randomIndex]] = [array[randomIndex], array[currentIndex]]; } return array; }
 function calculateCardPoints(cardsArray) { if (!cardsArray || cardsArray.length === 0) return 0; return cardsArray.reduce((sum, cardString) => { const rank = getRank(cardString); return sum + (CARD_POINT_VALUES[rank] || 0); }, 0); }
 
-// --- Game Logic Functions (Adapted for multi-table) ---
+// --- Game Logic Functions ---
 
 function resetTable(tableId, keepPlayersAsSpectators = true) {
     if (!tables[tableId]) return;
     const originalPlayers = { ...tables[tableId].players };
     const originalScores = { ...tables[tableId].scores };
-
     tables[tableId] = getInitialGameData(tableId);
-
     if (keepPlayersAsSpectators) {
         for (const playerId in originalPlayers) {
             const playerInfo = players[playerId];
@@ -139,7 +137,7 @@ function initializeNewRoundState(table) {
         currentHighestBidDetails: null, trumpSuit: null, bidWinnerInfo: null, biddingTurnPlayerName: null,
         bidsMadeCount: 0, originalFrogBidderId: null, soloBidMadeAfterFrog: false, currentTrickCards: [],
         trickTurnPlayerName: null, tricksPlayedCount: 0, leadSuitCurrentTrick: null, trumpBroken: false,
-        trickLeaderName: null, capturedTricks: {}, roundSummary: null,
+        trickLeaderName: null, capturedTricks: {}, roundSummary: null, revealedWidowForFrog: [],
         lastCompletedTrick: null, playersWhoPassedThisRound: [],
     });
     table.playerOrderActive.forEach(pName => { if (pName && table.scores[pName] !== undefined) table.capturedTricks[pName] = []; });
@@ -154,7 +152,6 @@ function transitionToPlayingPhase(table) {
     table.lastCompletedTrick = null;
     table.trickLeaderName = table.bidWinnerInfo.playerName;
     table.trickTurnPlayerName = table.bidWinnerInfo.playerName;
-    
     emitTableUpdate(table.tableId);
 }
 
@@ -163,7 +160,6 @@ function resolveBiddingFinal(table) {
         table.state = "Round Skipped";
         setTimeout(() => {
             if (tables[table.tableId]?.state === "Round Skipped") {
-                 console.log(`[${table.tableId}] All players passed. Preparing next round.`);
                  prepareNextRound(table.tableId);
             }
         }, 5000);
@@ -192,27 +188,21 @@ function checkForFrogUpgrade(table) {
 
 // --- Socket.IO Connection Handling ---
 io.on("connection", (socket) => {
-    console.log(`[CONNECTION] New client connected: ${socket.id}`);
     
-    // --- User & Lobby Management ---
     socket.on("login", ({ playerName }) => {
-        console.log(`[DEBUG] Received 'login' for playerName: ${playerName}`);
         const newPlayerId = uuidv4();
         players[newPlayerId] = { socketId: socket.id, playerName, tableId: null, disconnected: false };
         sockets[socket.id] = newPlayerId;
-        console.log(`[DEBUG] New player created. ID: ${newPlayerId}, Name: ${playerName}. Total players: ${Object.keys(players).length}`);
         socket.emit("assignedPlayerId", { playerId: newPlayerId, playerName });
         emitLobbyUpdate();
     });
 
     socket.on("reconnectPlayer", ({ playerId, playerName }) => {
-        console.log(`[DEBUG] Received 'reconnectPlayer' for playerId: ${playerId}, Name: ${playerName}`);
         sockets[socket.id] = playerId;
         if (players[playerId]) {
             const player = players[playerId];
             player.socketId = socket.id;
             player.disconnected = false;
-            console.log(`[DEBUG] Player ${playerName} reconnected successfully.`);
             
             if (player.tableId && tables[player.tableId]?.players[playerId]) {
                 const table = tables[player.tableId];
@@ -226,7 +216,6 @@ io.on("connection", (socket) => {
             }
             socket.emit("assignedPlayerId", { playerId, playerName: player.playerName });
         } else {
-            console.log(`[DEBUG] Reconnecting player not found in 'players' object. Creating new entry.`);
             players[playerId] = { socketId: socket.id, playerName, tableId: null, disconnected: false };
             socket.emit("assignedPlayerId", { playerId, playerName });
         }
@@ -238,7 +227,6 @@ io.on("connection", (socket) => {
         if (!playerId || !players[playerId]) return;
         const oldName = players[playerId].playerName;
         players[playerId].playerName = newName;
-        
         const tableId = players[playerId].tableId;
         if(tableId && tables[tableId]?.players[playerId]){
             const table = tables[tableId];
@@ -257,14 +245,12 @@ io.on("connection", (socket) => {
         emitLobbyUpdate();
     });
 
-    // --- Table Management ---
     socket.on("joinTable", ({ tableId }) => {
         const playerId = sockets[socket.id];
         if (!playerId || !players[playerId]) return;
         const player = players[playerId];
         const table = tables[tableId];
         if (!table) return;
-
         if (player.tableId && player.tableId !== tableId) {
             const oldTable = tables[player.tableId];
             if(oldTable && oldTable.players[playerId]){
@@ -273,15 +259,12 @@ io.on("connection", (socket) => {
                 emitTableUpdate(player.tableId);
             }
         }
-        
         const activePlayers = Object.values(table.players).filter(p => !p.isSpectator && !p.disconnected);
         const canTakeSeat = activePlayers.length < MAX_PLAYERS_PER_TABLE && !table.gameStarted;
         const joinAsSpectator = !canTakeSeat;
-
         player.tableId = tableId;
         table.players[playerId] = { playerName: player.playerName, socketId: socket.id, isSpectator: joinAsSpectator, disconnected: false };
         socket.join(tableId);
-        
         if (!joinAsSpectator) {
              if (table.scores[player.playerName] === undefined) table.scores[player.playerName] = 120;
              const numActivePlayers = Object.values(table.players).filter(p => !p.isSpectator && !p.disconnected).length;
@@ -289,7 +272,6 @@ io.on("connection", (socket) => {
                 table.state = "Ready to Start";
              }
         }
-        
         socket.emit("joinedTable", {tableId, gameState: table});
         emitTableUpdate(tableId);
         emitLobbyUpdate();
@@ -298,16 +280,13 @@ io.on("connection", (socket) => {
     socket.on("leaveTable", ({tableId}) => {
         const playerId = sockets[socket.id];
         if (!playerId || !players[playerId]) return;
-        
         const player = players[playerId];
         const table = tables[tableId];
         if(!table || !table.players[playerId]) return;
-        
         const wasActivePlayer = !table.players[playerId].isSpectator;
         delete table.players[playerId];
         player.tableId = null;
         socket.leave(tableId);
-        
         if(wasActivePlayer && table.gameStarted){
             resetTable(tableId, true);
         } else {
@@ -321,26 +300,22 @@ io.on("connection", (socket) => {
         socket.emit("lobbyState", getLobbyState());
     });
     
-    // --- Game Flow Handlers ---
     socket.on("startGame", ({ tableId }) => {
         const table = tables[tableId];
         if (!table || table.gameStarted) return;
         const activePlayerIds = Object.keys(table.players).filter(pId => !table.players[pId].isSpectator && !table.players[pId].disconnected);
         if (activePlayerIds.length < 3) return;
-
         table.playerMode = activePlayerIds.length;
         table.gameStarted = true;
-        
         const shuffledPlayerIds = shuffle([...activePlayerIds]);
         table.dealer = shuffledPlayerIds[0];
         table.playerOrderActive = [];
-
         if (table.playerMode === 4) {
              const dealerIndex = shuffledPlayerIds.indexOf(table.dealer);
              for (let i = 1; i <= 3; i++) {
                  table.playerOrderActive.push(getPlayerNameByPlayerId(shuffledPlayerIds[(dealerIndex + i) % 4], table));
              }
-        } else { // 3-Player game
+        } else {
              const dealerIndex = shuffledPlayerIds.indexOf(table.dealer);
              for (let i = 1; i <= 3; i++) {
                 const playerToPushId = shuffledPlayerIds[(dealerIndex + i) % 3];
@@ -348,7 +323,6 @@ io.on("connection", (socket) => {
              }
              if (table.scores[PLACEHOLDER_ID] === undefined) table.scores[PLACEHOLDER_ID] = 120;
         }
-
         initializeNewRoundState(table);
         table.state = "Dealing Pending";
         emitTableUpdate(tableId);
@@ -359,7 +333,6 @@ io.on("connection", (socket) => {
         const table = tables[tableId];
         const playerId = sockets[socket.id];
         if (!table || table.state !== "Dealing Pending" || playerId !== table.dealer) return;
-        
         const shuffledDeck = shuffle([...deck]);
         const numActivePlayers = table.playerOrderActive.length;
         table.playerOrderActive.forEach((activePName, i) => {
@@ -369,7 +342,6 @@ io.on("connection", (socket) => {
         table.originalDealtWidow = [...table.widow];
         table.state = "Bidding Phase";
         table.biddingTurnPlayerName = table.playerOrderActive[0];
-        
         emitTableUpdate(tableId);
     });
 
@@ -378,10 +350,8 @@ io.on("connection", (socket) => {
         const playerId = sockets[socket.id];
         if (!table || !playerId) return;
         const pName = getPlayerNameByPlayerId(playerId, table);
-        
         if (table.state !== "Bidding Phase" && table.state !== "Awaiting Frog Upgrade Decision") return;
         if (table.state === "Bidding Phase" && pName !== table.biddingTurnPlayerName) return;
-
         if (table.state === "Awaiting Frog Upgrade Decision") {
             if (playerId !== table.originalFrogBidderId || (bid !== "Heart Solo" && bid !== "Pass")) return;
             if (bid === "Heart Solo") table.currentHighestBidDetails = { playerId, playerName: pName, bid: "Heart Solo" };
@@ -389,10 +359,7 @@ io.on("connection", (socket) => {
             resolveBiddingFinal(table);
             return;
         }
-
-        if (!BID_HIERARCHY.includes(bid)) return;
-        if (table.playersWhoPassedThisRound.includes(pName)) return;
-
+        if (!BID_HIERARCHY.includes(bid) || table.playersWhoPassedThisRound.includes(pName)) return;
         const currentHighestBidIndex = table.currentHighestBidDetails ? BID_HIERARCHY.indexOf(table.currentHighestBidDetails.bid) : -1;
         if (bid !== "Pass" && BID_HIERARCHY.indexOf(bid) <= currentHighestBidIndex) return;
 
@@ -406,7 +373,11 @@ io.on("connection", (socket) => {
         
         const activeBiddersRemaining = table.playerOrderActive.filter(name => !table.playersWhoPassedThisRound.includes(name));
         let endBidding = false;
-        if(activeBiddersRemaining.length <= 1 || table.playersWhoPassedThisRound.length === table.playerOrderActive.length) {
+        if (table.playersWhoPassedThisRound.length === table.playerOrderActive.length) {
+            endBidding = true;
+        } else if (table.currentHighestBidDetails && activeBiddersRemaining.length === 1 && activeBiddersRemaining[0] === table.currentHighestBidDetails.playerName) {
+            endBidding = true;
+        } else if (table.currentHighestBidDetails && activeBiddersRemaining.length === 0) {
             endBidding = true;
         }
         
@@ -423,13 +394,12 @@ io.on("connection", (socket) => {
                     break;
                 }
             }
-            if(nextBidderName) {
+            if (nextBidderName) {
                 table.biddingTurnPlayerName = nextBidderName;
             } else {
                 checkForFrogUpgrade(table);
             }
         }
-        
         emitTableUpdate(tableId);
     });
 
@@ -437,13 +407,8 @@ io.on("connection", (socket) => {
         const table = tables[tableId];
         const playerId = sockets[socket.id];
         if(!table || table.state !== "FrogBidderConfirmWidow" || table.bidWinnerInfo.playerId !== playerId) return;
-
         table.state = "Frog Widow Exchange";
         table.revealedWidowForFrog = [...table.widow];
-
-        const winnerSocket = io.sockets.sockets.get(table.players[playerId].socketId);
-        if(winnerSocket) winnerSocket.emit("promptFrogWidowExchange", { widow: table.widow });
-        
         emitTableUpdate(tableId);
     });
 
@@ -452,14 +417,11 @@ io.on("connection", (socket) => {
         const playerId = sockets[socket.id];
         if(!table || table.state !== "Frog Widow Exchange" || table.bidWinnerInfo.playerId !== playerId) return;
         if(!Array.isArray(discards) || discards.length !== 3) return;
-
         const pName = getPlayerNameByPlayerId(playerId, table);
         const combinedHand = [...table.hands[pName], ...table.widow];
         if(!discards.every(card => combinedHand.includes(card))) return;
-
         table.widowDiscardsForFrogBidder = discards;
         table.hands[pName] = combinedHand.filter(card => !discards.includes(card));
-        
         transitionToPlayingPhase(table);
     });
 
@@ -468,7 +430,6 @@ io.on("connection", (socket) => {
         const playerId = sockets[socket.id];
         if(!table || table.state !== "Trump Selection" || table.bidWinnerInfo.playerId !== playerId) return;
         if(!["S", "C", "D"].includes(suit)) return;
-        
         table.trumpSuit = suit;
         transitionToPlayingPhase(table);
     });
@@ -478,15 +439,11 @@ io.on("connection", (socket) => {
         if (!table) return;
         const playerId = sockets[socket.id];
         const pName = getPlayerNameByPlayerId(playerId, table);
-
         if (!pName || table.state !== "Playing Phase" || pName !== table.trickTurnPlayerName) return;
-        
         const hand = table.hands[pName];
         if (!hand || !hand.includes(card)) return;
-        
         const isLeading = table.currentTrickCards.length === 0;
         const playedSuit = getSuit(card);
-
         if (isLeading) {
             if (playedSuit === table.trumpSuit && !table.trumpBroken) {
                 const isHandAllTrump = hand.every(c => getSuit(c) === table.trumpSuit);
@@ -497,27 +454,21 @@ io.on("connection", (socket) => {
             const hasLeadSuit = hand.some(c => getSuit(c) === leadCardSuit);
             if (playedSuit !== leadCardSuit && hasLeadSuit) return socket.emit("error", `Must follow ${SUITS[leadCardSuit]}.`);
         }
-        
         table.hands[pName] = hand.filter(c => c !== card);
         table.currentTrickCards.push({ playerId, playerName: pName, card });
-        
         if (isLeading) table.leadSuitCurrentTrick = playedSuit;
         if (playedSuit === table.trumpSuit) table.trumpBroken = true;
-        
         const expectedCardsInTrick = table.playerOrderActive.length;
         if (table.currentTrickCards.length === expectedCardsInTrick) {
             const winnerNameOfTrick = determineTrickWinner(table.currentTrickCards, table.leadSuitCurrentTrick, table.trumpSuit);
             const currentTrickNumber = table.tricksPlayedCount + 1;
-            
             if (winnerNameOfTrick) {
                 if (!table.capturedTricks[winnerNameOfTrick]) table.capturedTricks[winnerNameOfTrick] = [];
                 table.capturedTricks[winnerNameOfTrick].push(table.currentTrickCards.map(p => p.card));
             }
-            
             table.lastCompletedTrick = { cards: [...table.currentTrickCards], winnerName: winnerNameOfTrick, leadSuit: table.leadSuitCurrentTrick, trickNumber: currentTrickNumber };
             table.tricksPlayedCount++;
             table.trickLeaderName = winnerNameOfTrick;
-            
             if (table.tricksPlayedCount === 11) {
                 calculateRoundScores(tableId);
             } else {
@@ -557,22 +508,15 @@ io.on("connection", (socket) => {
 
     socket.on("hardResetServer", () => {
         console.log(`[ADMIN] Received 'hardResetServer' from ${players[sockets[socket.id]]?.playerName || 'a user'}.`);
-        console.log("[ADMIN] Wiping all player and table data...");
-
         players = {};
         sockets = {};
         tables = {};
-        console.log("[ADMIN] In-memory state cleared.");
-
         initializeServer();
-        console.log("[ADMIN] Server state has been re-initialized.");
-
-        console.log("[ADMIN] Emitting 'forceDisconnectAndReset' to all clients.");
+        console.log("[ADMIN] Server state has been reset.");
         io.emit("forceDisconnectAndReset", "The server has been reset by an administrator.");
     });
 
     socket.on("disconnect", (reason) => {
-        console.log(`[CONNECTION] Client disconnected: ${socket.id}. Reason: ${reason}`);
         const playerId = sockets[socket.id];
         if (playerId && players[playerId]) {
             const player = players[playerId];
@@ -580,9 +524,7 @@ io.on("connection", (socket) => {
             if (player.tableId && tables[player.tableId]?.players[playerId]) {
                 const table = tables[player.tableId];
                 table.players[playerId].disconnected = true;
-
                 if(table.gameStarted && table.state !== "Waiting for Players" && table.state !== "Ready to Start" && table.state !== "Game Over"){
-                    console.log(`[${player.tableId}] Player ${player.playerName} disconnected mid-game. Resetting table.`);
                     resetTable(player.tableId, true);
                 } else {
                    emitTableUpdate(player.tableId);
@@ -594,17 +536,13 @@ io.on("connection", (socket) => {
     });
 });
 
-// --- Core Game Logic Functions ---
-
 function determineTrickWinner(trickCards, leadSuit, trumpSuit) {
     let winningPlay = null;
     let highestTrumpPlay = null;
     let highestLeadSuitPlay = null;
-
     for (const play of trickCards) {
         const cardSuit = getSuit(play.card);
         const cardRankIndex = RANKS_ORDER.indexOf(getRank(play.card));
-        
         if (cardSuit === trumpSuit) {
             if (!highestTrumpPlay || cardRankIndex > RANKS_ORDER.indexOf(getRank(highestTrumpPlay.card))) {
                 highestTrumpPlay = play;
@@ -615,7 +553,6 @@ function determineTrickWinner(trickCards, leadSuit, trumpSuit) {
             }
         }
     }
-    
     winningPlay = highestTrumpPlay || highestLeadSuitPlay;
     return winningPlay ? winningPlay.playerName : null;
 }
@@ -623,16 +560,13 @@ function determineTrickWinner(trickCards, leadSuit, trumpSuit) {
 function calculateRoundScores(tableId) {
     const table = tables[tableId];
     if (!table || !table.bidWinnerInfo) return;
-
     const { bidWinnerInfo, playerOrderActive, playerMode, scores, capturedTricks, widowDiscardsForFrogBidder, originalDealtWidow, trickLeaderName } = table;
     const bidWinnerName = bidWinnerInfo.playerName;
     const bidType = bidWinnerInfo.bid;
     const currentBidMultiplier = BID_MULTIPLIERS[bidType];
-
     let bidderTotalCardPoints = 0;
     let defendersTotalCardPoints = 0;
     let awardedWidowInfo = { cards: [], points: 0, awardedTo: null };
-
     if (bidType === "Frog") {
         awardedWidowInfo.cards = [...widowDiscardsForFrogBidder];
         awardedWidowInfo.points = calculateCardPoints(awardedWidowInfo.cards);
@@ -654,7 +588,6 @@ function calculateRoundScores(tableId) {
             awardedWidowInfo.awardedTo = trickLeaderName;
         }
     }
-
     playerOrderActive.forEach(pName => {
         const capturedCards = (capturedTricks[pName] || []).flat();
         const playerTrickPoints = calculateCardPoints(capturedCards);
@@ -664,14 +597,11 @@ function calculateRoundScores(tableId) {
             defendersTotalCardPoints += playerTrickPoints;
         }
     });
-    
     const bidMadeSuccessfully = bidderTotalCardPoints > 60;
     const scoreDifferenceFrom60 = bidderTotalCardPoints - 60;
     const exchangeValue = Math.abs(scoreDifferenceFrom60) * currentBidMultiplier;
-    
     const scoresBeforeExchange = JSON.parse(JSON.stringify(scores));
     let roundMessage = "";
-
     if (scoreDifferenceFrom60 === 0) {
         roundMessage = `${bidWinnerName} scored exactly 60. No points exchanged.`;
     } else if (bidMadeSuccessfully) {
@@ -684,14 +614,13 @@ function calculateRoundScores(tableId) {
         });
         scores[bidWinnerName] += totalPointsGained;
         roundMessage = `${bidWinnerName} succeeded! Gains ${totalPointsGained} points.`;
-    } else { // Bid failed
+    } else {
         let totalPointsLost = 0;
         const activeOpponents = playerOrderActive.filter(pName => pName !== bidWinnerName);
         activeOpponents.forEach(oppName => {
             scores[oppName] += exchangeValue;
             totalPointsLost += exchangeValue;
         });
-
         if (playerMode === 3) {
             scores[PLACEHOLDER_ID] += exchangeValue;
             totalPointsLost += exchangeValue;
@@ -705,11 +634,9 @@ function calculateRoundScores(tableId) {
         scores[bidWinnerName] -= totalPointsLost;
         roundMessage = `${bidWinnerName} failed. Loses ${totalPointsLost} points.`;
     }
-
     let isGameOver = false;
     let gameWinner = null;
     const finalPlayerScores = Object.entries(scores).filter(([key]) => key !== PLACEHOLDER_ID);
-
     if(finalPlayerScores.some(([,score]) => score <= 0)) {
         isGameOver = true;
         gameWinner = finalPlayerScores.sort((a,b) => b[1] - a[1])[0][0];
@@ -718,7 +645,6 @@ function calculateRoundScores(tableId) {
     } else {
         table.state = "Awaiting Next Round Trigger";
     }
-
     table.roundSummary = {
         bidWinnerName, bidType, trumpSuit: table.trumpSuit,
         bidderCardPoints: bidderTotalCardPoints, defenderCardPoints: defendersTotalCardPoints,
@@ -726,49 +652,41 @@ function calculateRoundScores(tableId) {
         scoresBeforeExchange, finalScores: scores,
         isGameOver, gameWinner, message: roundMessage,
     };
-    
     emitTableUpdate(tableId);
 }
 
 function prepareNextRound(tableId) {
     const table = tables[tableId];
     if (!table || !table.gameStarted) return;
-    
     const activePlayerIds = Object.keys(table.players).filter(pId => !table.players[pId].isSpectator && !table.players[pId].disconnected);
     if (activePlayerIds.length !== table.playerMode) {
         resetTable(tableId, true);
         return;
     }
-    
     const rotationPlayerIds = table.playerMode === 4 
         ? Object.keys(table.players).filter(pId => !table.players[pId].isSpectator) 
         : activePlayerIds;
-
     const lastDealerIndex = rotationPlayerIds.indexOf(table.dealer);
     const nextDealerId = rotationPlayerIds[(lastDealerIndex + 1) % rotationPlayerIds.length];
-    
     table.dealer = nextDealerId;
     table.playerOrderActive = [];
-
     if (table.playerMode === 4) {
         const dealerIndex = rotationPlayerIds.indexOf(table.dealer);
         for (let i = 1; i <= 3; i++) {
             const activePlayerId = rotationPlayerIds[(dealerIndex + i) % 4];
             table.playerOrderActive.push(getPlayerNameByPlayerId(activePlayerId, table));
         }
-    } else { // 3 Player Game
+    } else {
         const dealerIndex = rotationPlayerIds.indexOf(table.dealer);
         for (let i = 1; i <= 3; i++) {
             const activePlayerId = rotationPlayerIds[(dealerIndex + i) % 3];
             table.playerOrderActive.push(getPlayerNameByPlayerId(activePlayerId, table));
         }
     }
-    
     initializeNewRoundState(table);
     table.state = "Dealing Pending";
     emitTableUpdate(tableId);
 }
 
-// --- Server Listening ---
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => { console.log(`Sluff Game Server (${SERVER_VERSION}) running on port ${PORT}`); });
