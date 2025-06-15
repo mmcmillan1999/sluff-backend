@@ -9,7 +9,7 @@ const { v4: uuidv4 } = require('uuid');
 const app = express();
 const server = http.createServer(app);
 
-const SERVER_VERSION = "4.0.5 - Bidding Logic Fix";
+const SERVER_VERSION = "4.0.6 - Start Game Button Fix";
 console.log(`SLUFF SERVER (${SERVER_VERSION}): Initializing...`);
 
 const io = new Server(server, {
@@ -308,6 +308,7 @@ io.on("connection", (socket) => {
              const numActivePlayers = activePlayers.length + 1;
              if(numActivePlayers >= 3 && !table.gameStarted) {
                 table.state = "Ready to Start";
+                table.playerOrderActive = Object.keys(table.players).filter(pId => !table.players[pId].isSpectator);
              }
         }
         
@@ -340,6 +341,7 @@ io.on("connection", (socket) => {
 
             if (Object.keys(table.players).filter(pId => !table.players[pId].isSpectator).length < 3) {
                  table.state = "Waiting for Players";
+                 table.playerOrderActive = [];
             }
             
             emitTableUpdate(tableId);
@@ -427,18 +429,13 @@ io.on("connection", (socket) => {
         if (table.state !== "Bidding Phase") return socket.emit("errorMessage", "Not in Bidding Phase.");
         if (pName !== table.biddingTurnPlayerName) return socket.emit("errorMessage", "Not your turn to bid.");
         
-        // ... (The rest of the comprehensive bidding logic from the original server.js)
-        // This is a simplified placeholder for the full logic.
         console.log(`[${SERVER_VERSION}][${table.tableId}] Player ${pName} bid ${bid}`);
 
         table.bidsThisRound.push({ playerId: playerId, playerName: pName, bidValue: bid });
         
-        // Example of moving to next bidder
         const currentBidderIndex = table.playerOrderActive.indexOf(pName);
         const nextBidderIndex = (currentBidderIndex + 1) % table.playerOrderActive.length;
         table.biddingTurnPlayerName = table.playerOrderActive[nextBidderIndex];
-
-        // This would need the full logic to handle passes, bid hierarchy, and ending the bid phase
         
         emitTableUpdate(table.tableId);
     });
@@ -488,6 +485,7 @@ io.on("connection", (socket) => {
         } else {
             if (Object.values(table.players).filter(p => !p.isSpectator).length < 3) {
                  table.state = "Waiting for Players";
+                 table.playerOrderActive = [];
             }
              emitTableUpdate(table.tableId);
         }
@@ -520,6 +518,7 @@ io.on("connection", (socket) => {
 
         if (Object.values(table.players).filter(pId => !table.players[pId].isSpectator).length >= 3) {
             table.state = "Ready to Start";
+            table.playerOrderActive = Object.keys(table.players).filter(pId => !table.players[pId].isSpectator);
         }
         
         emitTableUpdate(table.tableId);
