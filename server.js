@@ -1,4 +1,4 @@
-// --- Backend/server.js (v4.1.2) ---
+// --- Backend/server.js (v4.3.0) ---
 require("dotenv").config();
 const http = require("http");
 const { Server } = require("socket.io");
@@ -10,7 +10,7 @@ const app = express();
 const server = http.createServer(app);
 
 // --- VERSION UPDATED ---
-const SERVER_VERSION = "4.1.2 - Fixed 3-Player Start Logic";
+const SERVER_VERSION = "4.3.0 - Full Logic Restoration & Hard Reset";
 console.log(`SLUFF SERVER (${SERVER_VERSION}): Initializing...`);
 
 const io = new Server(server, {
@@ -355,9 +355,9 @@ io.on("connection", (socket) => {
              for (let i = 1; i <= 3; i++) {
                  table.playerOrderActive.push(getPlayerNameByPlayerId(shuffledPlayerIds[(dealerIndex + i) % 4], table));
              }
-        } else { // --- FIX: 3-Player game start logic ---
+        } else { // 3-Player game
              const dealerIndex = shuffledPlayerIds.indexOf(table.dealer);
-             for (let i = 1; i <= 3; i++) { // Bidding order starts to the left of the dealer
+             for (let i = 1; i <= 3; i++) {
                 const playerToPushId = shuffledPlayerIds[(dealerIndex + i) % 3];
                 table.playerOrderActive.push(getPlayerNameByPlayerId(playerToPushId, table));
              }
@@ -488,8 +488,10 @@ io.on("connection", (socket) => {
         transitionToPlayingPhase(table);
     });
 
+    // --- FUNCTION RESTORED ---
     socket.on("playCard", ({ tableId, card }) => {
         const table = tables[tableId];
+        if (!table) return;
         const playerId = sockets[socket.id];
         const pName = getPlayerNameByPlayerId(playerId, table);
 
@@ -569,6 +571,21 @@ io.on("connection", (socket) => {
         resetTable(tableId, true);
     });
 
+    // --- NEW FEATURE ---
+    socket.on("hardResetServer", () => {
+        console.log(`[ADMIN] Received 'hardResetServer' from ${players[sockets[socket.id]]?.playerName || 'a user'}.`);
+        console.log("[ADMIN] Wiping all player and table data.");
+
+        players = {};
+        sockets = {};
+        tables = {};
+
+        initializeServer();
+        console.log("[ADMIN] Server state has been reset.");
+
+        io.emit("forceDisconnectAndReset", "The server has been reset by an administrator.");
+    });
+
     socket.on("disconnect", (reason) => {
         const playerId = sockets[socket.id];
         if (playerId && players[playerId]) {
@@ -617,6 +634,7 @@ function determineTrickWinner(trickCards, leadSuit, trumpSuit) {
     return winningPlay ? winningPlay.playerName : null;
 }
 
+// --- FUNCTION RESTORED ---
 function calculateRoundScores(tableId) {
     const table = tables[tableId];
     if (!table || !table.bidWinnerInfo) return;
@@ -727,6 +745,7 @@ function calculateRoundScores(tableId) {
     emitTableUpdate(tableId);
 }
 
+// --- FUNCTION RESTORED ---
 function prepareNextRound(tableId) {
     const table = tables[tableId];
     if (!table || !table.gameStarted) return;
@@ -737,6 +756,7 @@ function prepareNextRound(tableId) {
         return;
     }
     
+    // In 4P mode, all non-spectators rotate. In 3P mode, only active players rotate.
     const rotationPlayerIds = table.playerMode === 4 
         ? Object.keys(table.players).filter(pId => !table.players[pId].isSpectator) 
         : activePlayerIds;
