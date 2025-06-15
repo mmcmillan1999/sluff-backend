@@ -1,4 +1,4 @@
-// --- Backend/server.js (v4.3.0) ---
+// --- Backend/server.js (v4.3.1) ---
 require("dotenv").config();
 const http = require("http");
 const { Server } = require("socket.io");
@@ -10,7 +10,7 @@ const app = express();
 const server = http.createServer(app);
 
 // --- VERSION UPDATED ---
-const SERVER_VERSION = "4.3.0 - Full Logic Restoration & Hard Reset";
+const SERVER_VERSION = "4.3.1 - Added Detailed Reset/Login Logging";
 console.log(`SLUFF SERVER (${SERVER_VERSION}): Initializing...`);
 
 const io = new Server(server, {
@@ -43,20 +43,13 @@ for (const suitKey in SUITS) {
 }
 
 // --- Helper Functions for Initial Game State ---
-function getInitialInsuranceState() {
-    return {
-        isActive: false, bidMultiplier: null, bidderPlayerName: null, bidderRequirement: 0,
-        defenderOffers: {}, dealExecuted: false, executedDetails: null
-    };
-}
-
 function getInitialGameData(tableId) {
     return {
         tableId: tableId,
         state: "Waiting for Players",
-        players: {}, // maps playerId -> { playerName, socketId, isSpectator, disconnected }
+        players: {},
         playerOrderActive: [],
-        dealer: null, // This will be a playerId
+        dealer: null,
         hands: {},
         widow: [],
         originalDealtWidow: [],
@@ -79,17 +72,15 @@ function getInitialGameData(tableId) {
         trickLeaderName: null,
         capturedTricks: {},
         roundSummary: null,
-        revealedWidowForFrog: [],
         lastCompletedTrick: null,
         playersWhoPassedThisRound: [],
         playerMode: null,
         serverVersion: SERVER_VERSION,
-        insurance: getInitialInsuranceState()
     };
 }
 
-// --- Server Initialization ---
 function initializeServer() {
+    console.log("[DEBUG] Initializing server state with empty tables.");
     for (let i = 1; i <= NUM_TABLES; i++) {
         const tableId = `table-${i}`;
         tables[tableId] = getInitialGameData(tableId);
@@ -148,8 +139,8 @@ function initializeNewRoundState(table) {
         currentHighestBidDetails: null, trumpSuit: null, bidWinnerInfo: null, biddingTurnPlayerName: null,
         bidsMadeCount: 0, originalFrogBidderId: null, soloBidMadeAfterFrog: false, currentTrickCards: [],
         trickTurnPlayerName: null, tricksPlayedCount: 0, leadSuitCurrentTrick: null, trumpBroken: false,
-        trickLeaderName: null, capturedTricks: {}, roundSummary: null, revealedWidowForFrog: [],
-        lastCompletedTrick: null, playersWhoPassedThisRound: [], insurance: getInitialInsuranceState()
+        trickLeaderName: null, capturedTricks: {}, roundSummary: null,
+        lastCompletedTrick: null, playersWhoPassedThisRound: [],
     });
     table.playerOrderActive.forEach(pName => { if (pName && table.scores[pName] !== undefined) table.capturedTricks[pName] = []; });
 }
@@ -164,18 +155,6 @@ function transitionToPlayingPhase(table) {
     table.trickLeaderName = table.bidWinnerInfo.playerName;
     table.trickTurnPlayerName = table.bidWinnerInfo.playerName;
     
-    if (table.playerMode === 3 && table.bidWinnerInfo.bid !== "Frog") {
-        table.insurance.isActive = true;
-        table.insurance.bidMultiplier = BID_MULTIPLIERS[table.bidWinnerInfo.bid];
-        table.insurance.bidderPlayerName = table.bidWinnerInfo.playerName;
-        const bidderReq = 120 * table.insurance.bidMultiplier;
-        const defenderOffer = -60 * table.insurance.bidMultiplier;
-        table.insurance.bidderRequirement = bidderReq;
-        table.playerOrderActive.forEach(pName => { 
-            if(pName !== table.bidWinnerInfo.playerName) table.insurance.defenderOffers[pName] = defenderOffer; 
-        });
-        console.log(`[${table.tableId}] INSURANCE ACTIVATED for ${table.bidWinnerInfo.playerName}. Req: ${bidderReq}, Offer: ${defenderOffer}`);
-    }
     emitTableUpdate(table.tableId);
 }
 
@@ -213,22 +192,27 @@ function checkForFrogUpgrade(table) {
 
 // --- Socket.IO Connection Handling ---
 io.on("connection", (socket) => {
+    console.log(`[CONNECTION] New client connected: ${socket.id}`);
     
     // --- User & Lobby Management ---
     socket.on("login", ({ playerName }) => {
+        console.log(`[DEBUG] Received 'login' for playerName: ${playerName}`);
         const newPlayerId = uuidv4();
         players[newPlayerId] = { socketId: socket.id, playerName, tableId: null, disconnected: false };
         sockets[socket.id] = newPlayerId;
+        console.log(`[DEBUG] New player created. ID: ${newPlayerId}, Name: ${playerName}. Total players: ${Object.keys(players).length}`);
         socket.emit("assignedPlayerId", { playerId: newPlayerId, playerName });
         emitLobbyUpdate();
     });
 
     socket.on("reconnectPlayer", ({ playerId, playerName }) => {
+        console.log(`[DEBUG] Received 'reconnectPlayer' for playerId: ${playerId}, Name: ${playerName}`);
         sockets[socket.id] = playerId;
         if (players[playerId]) {
             const player = players[playerId];
             player.socketId = socket.id;
             player.disconnected = false;
+            console.log(`[DEBUG] Player ${playerName} reconnected successfully.`);
             
             if (player.tableId && tables[player.tableId]?.players[playerId]) {
                 const table = tables[player.tableId];
@@ -242,6 +226,7 @@ io.on("connection", (socket) => {
             }
             socket.emit("assignedPlayerId", { playerId, playerName: player.playerName });
         } else {
+            console.log(`[DEBUG] Reconnecting player not found in 'players' object. Creating new entry.`);
             players[playerId] = { socketId: socket.id, playerName, tableId: null, disconnected: false };
             socket.emit("assignedPlayerId", { playerId, playerName });
         }
@@ -488,7 +473,6 @@ io.on("connection", (socket) => {
         transitionToPlayingPhase(table);
     });
 
-    // --- FUNCTION RESTORED ---
     socket.on("playCard", ({ tableId, card }) => {
         const table = tables[tableId];
         if (!table) return;
@@ -571,22 +555,24 @@ io.on("connection", (socket) => {
         resetTable(tableId, true);
     });
 
-    // --- NEW FEATURE ---
     socket.on("hardResetServer", () => {
         console.log(`[ADMIN] Received 'hardResetServer' from ${players[sockets[socket.id]]?.playerName || 'a user'}.`);
-        console.log("[ADMIN] Wiping all player and table data.");
+        console.log("[ADMIN] Wiping all player and table data...");
 
         players = {};
         sockets = {};
         tables = {};
+        console.log("[ADMIN] In-memory state cleared.");
 
         initializeServer();
-        console.log("[ADMIN] Server state has been reset.");
+        console.log("[ADMIN] Server state has been re-initialized.");
 
+        console.log("[ADMIN] Emitting 'forceDisconnectAndReset' to all clients.");
         io.emit("forceDisconnectAndReset", "The server has been reset by an administrator.");
     });
 
     socket.on("disconnect", (reason) => {
+        console.log(`[CONNECTION] Client disconnected: ${socket.id}. Reason: ${reason}`);
         const playerId = sockets[socket.id];
         if (playerId && players[playerId]) {
             const player = players[playerId];
@@ -634,7 +620,6 @@ function determineTrickWinner(trickCards, leadSuit, trumpSuit) {
     return winningPlay ? winningPlay.playerName : null;
 }
 
-// --- FUNCTION RESTORED ---
 function calculateRoundScores(tableId) {
     const table = tables[tableId];
     if (!table || !table.bidWinnerInfo) return;
@@ -745,7 +730,6 @@ function calculateRoundScores(tableId) {
     emitTableUpdate(tableId);
 }
 
-// --- FUNCTION RESTORED ---
 function prepareNextRound(tableId) {
     const table = tables[tableId];
     if (!table || !table.gameStarted) return;
@@ -756,7 +740,6 @@ function prepareNextRound(tableId) {
         return;
     }
     
-    // In 4P mode, all non-spectators rotate. In 3P mode, only active players rotate.
     const rotationPlayerIds = table.playerMode === 4 
         ? Object.keys(table.players).filter(pId => !table.players[pId].isSpectator) 
         : activePlayerIds;
@@ -785,7 +768,6 @@ function prepareNextRound(tableId) {
     table.state = "Dealing Pending";
     emitTableUpdate(tableId);
 }
-
 
 // --- Server Listening ---
 const PORT = process.env.PORT || 3000;
