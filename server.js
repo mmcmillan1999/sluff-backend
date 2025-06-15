@@ -1,4 +1,4 @@
-// --- Backend/server.js (v4.5.0) ---
+// --- Backend/server.js (v4.6.1) ---
 require("dotenv").config();
 const http = require("http");
 const { Server } = require("socket.io");
@@ -10,7 +10,7 @@ const app = express();
 const server = http.createServer(app);
 
 // --- VERSION UPDATED ---
-const SERVER_VERSION = "4.5.0 - Implemented Insurance Feature";
+const SERVER_VERSION = "4.6.1 - Fixed Dealer Rotation & Round Setup";
 console.log(`SLUFF SERVER (${SERVER_VERSION}): Initializing...`);
 
 const io = new Server(server, {
@@ -42,7 +42,6 @@ for (const suitKey in SUITS) {
 }
 
 // --- Helper Functions for Initial Game State ---
-// --- NEW FEATURE: Function to support Insurance state ---
 function getInitialInsuranceState() {
     return {
         isActive: false,
@@ -89,7 +88,6 @@ function getInitialGameData(tableId) {
         playersWhoPassedThisRound: [],
         playerMode: null,
         serverVersion: SERVER_VERSION,
-        // --- NEW FEATURE: Insurance state added to each table ---
         insurance: getInitialInsuranceState(),
     };
 }
@@ -144,7 +142,6 @@ function initializeNewRoundState(table) {
     table.playerOrderActive.forEach(pName => { if (pName && table.scores[pName] !== undefined) table.capturedTricks[pName] = []; });
 }
 
-// --- MODIFIED FUNCTION ---
 function transitionToPlayingPhase(table) {
     table.state = "Playing Phase";
     table.tricksPlayedCount = 0;
@@ -154,8 +151,6 @@ function transitionToPlayingPhase(table) {
     table.lastCompletedTrick = null;
     table.trickLeaderName = table.bidWinnerInfo.playerName;
     table.trickTurnPlayerName = table.bidWinnerInfo.playerName;
-    
-    // --- INSURANCE ACTIVATION LOGIC ---
     if (table.playerMode === 3) {
         table.insurance.isActive = true;
         const multiplier = BID_MULTIPLIERS[table.bidWinnerInfo.bid];
@@ -168,7 +163,6 @@ function transitionToPlayingPhase(table) {
         });
         console.log(`[${table.tableId}] INSURANCE ACTIVATED for ${table.bidWinnerInfo.playerName}.`);
     }
-
     emitTableUpdate(table.tableId);
 }
 
@@ -508,7 +502,6 @@ io.on("connection", (socket) => {
         io.emit("forceDisconnectAndReset", "The server has been reset by an administrator.");
     });
     
-    // --- NEW FEATURE: Insurance Handler ---
     socket.on("updateInsuranceSetting", ({ tableId, settingType, value }) => {
         const table = tables[tableId];
         const pName = getPlayerNameByPlayerId(sockets[socket.id], table);
@@ -638,30 +631,29 @@ function calculateRoundScores(tableId) {
     } else {
         table.state = "Awaiting Next Round Trigger";
     }
-    table.roundSummary = { bidWinnerName, bidType, trumpSuit: table.trumpSuit, bidderCardPoints, defenderCardPoints, awardedWidowInfo, bidMadeSuccessfully, scoresBeforeExchange, finalScores: scores, isGameOver, gameWinner, message: roundMessage };
+    table.roundSummary = { bidWinnerName, bidType, trumpSuit: table.trumpSuit, bidderCardPoints, defenderCardPoints, awardedWidowInfo, bidMadeSuccessfully, scoresBeforeExchange, finalScores: scores, isGameOver, gameWinner, message: roundMessage, dealerOfRoundId: table.dealer };
     emitTableUpdate(tableId);
 }
 
 function prepareNextRound(tableId) {
     const table = tables[tableId];
     if (!table || !table.gameStarted) return;
-    const activePlayerIds = Object.keys(table.players).filter(pId => !p.isSpectator && !p.disconnected);
-    if (activePlayerIds.length !== table.playerMode) { resetTable(tableId, true); return; }
-    const rotationPlayerIds = table.playerMode === 4 ? Object.keys(table.players).filter(pId => !p.isSpectator) : activePlayerIds;
-    const lastDealerIndex = rotationPlayerIds.indexOf(table.dealer);
-    const nextDealerId = rotationPlayerIds[(lastDealerIndex + 1) % rotationPlayerIds.length];
-    table.dealer = nextDealerId;
+    const lastDealerId = table.roundSummary?.dealerOfRoundId || table.dealer;
+    const allPlayerIds = Object.keys(table.players).filter(pId => !table.players[pId].isSpectator);
+    if (allPlayerIds.length < 3) { return resetTable(tableId, true); }
+    const lastDealerIndex = allPlayerIds.indexOf(lastDealerId);
+    const nextDealerIndex = (lastDealerIndex !== -1 ? lastDealerIndex + 1 : 1) % allPlayerIds.length;
+    table.dealer = allPlayerIds[nextDealerIndex];
     table.playerOrderActive = [];
+    const currentDealerIndex = allPlayerIds.indexOf(table.dealer);
     if (table.playerMode === 4) {
-        const dealerIndex = rotationPlayerIds.indexOf(table.dealer);
         for (let i = 1; i <= 3; i++) {
-            const activePlayerId = rotationPlayerIds[(dealerIndex + i) % 4];
+            const activePlayerId = allPlayerIds[(currentDealerIndex + i) % 4];
             table.playerOrderActive.push(getPlayerNameByPlayerId(activePlayerId, table));
         }
     } else {
-        const dealerIndex = rotationPlayerIds.indexOf(table.dealer);
         for (let i = 1; i <= 3; i++) {
-            const activePlayerId = rotationPlayerIds[(dealerIndex + i) % 3];
+            const activePlayerId = allPlayerIds[(currentDealerIndex + i) % 3];
             table.playerOrderActive.push(getPlayerNameByPlayerId(activePlayerId, table));
         }
     }
