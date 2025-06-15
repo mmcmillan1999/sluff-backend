@@ -9,7 +9,7 @@ const { v4: uuidv4 } = require('uuid');
 const app = express();
 const server = http.createServer(app);
 
-const SERVER_VERSION = "4.0.6 - Start Game Button Fix";
+const SERVER_VERSION = "4.0.7 - Full Bidding Logic & Features";
 console.log(`SLUFF SERVER (${SERVER_VERSION}): Initializing...`);
 
 const io = new Server(server, {
@@ -193,38 +193,16 @@ function initializeNewRoundState(table) {
     table.lastCompletedTrick = null; table.playersWhoPassedThisRound = [];
     table.insurance = getInitialInsuranceState();
 
-    const playersToInitTricksFor = table.playerOrderActive.length > 0 ? table.playerOrderActive : Object.values(table.players).map(p => p.playerName);
-    playersToInitTricksFor.forEach(pName => {
+    const activePlayerNames = Object.values(table.players)
+                                .filter(p => !p.isSpectator)
+                                .map(p => p.playerName);
+
+    activePlayerNames.forEach(pName => {
         if (pName && table.scores && table.scores[pName] !== undefined) {
             table.capturedTricks[pName] = [];
         }
     });
     console.log(`[${SERVER_VERSION}][${table.tableId}] New round state initialized.`);
-}
-
-function determineTrickWinner(trickCards, leadSuit, trumpSuit, table) {
-    if (!trickCards || trickCards.length === 0) return null;
-    let winningPlay = null;
-    let highestTrumpPlay = null;
-    let highestLeadSuitPlay = null;
-
-    for (const play of trickCards) {
-        const cardSuit = getSuit(play.card);
-        const cardRankIndex = RANKS_ORDER.indexOf(getRank(play.card));
-        if (cardSuit === trumpSuit) {
-            if (!highestTrumpPlay || cardRankIndex > RANKS_ORDER.indexOf(getRank(highestTrumpPlay.card))) {
-                highestTrumpPlay = play;
-            }
-        } else if (cardSuit === leadSuit) {
-            if (!highestLeadSuitPlay || cardRankIndex > RANKS_ORDER.indexOf(getRank(highestLeadSuitPlay.card))) {
-                highestLeadSuitPlay = play;
-            }
-        }
-    }
-    if (highestTrumpPlay) winningPlay = highestTrumpPlay;
-    else if (highestLeadSuitPlay) winningPlay = highestLeadSuitPlay;
-    
-    return winningPlay ? winningPlay.playerId : null;
 }
 
 // --- Socket.IO Connection Handling ---
@@ -246,7 +224,6 @@ io.on("connection", (socket) => {
 
     socket.on("reconnectPlayer", ({ playerId, playerName }) => {
         if (players[playerId]) {
-            console.log(`[${SERVER_VERSION}] Reconnecting player: ${playerName} (${playerId})`);
             const player = players[playerId];
             player.socketId = socket.id;
             player.disconnected = false;
@@ -267,12 +244,30 @@ io.on("connection", (socket) => {
             }
             emitLobbyUpdate();
         } else {
-            console.log(`[${SERVER_VERSION}] Reconnect failed for ${playerId}, treating as new login for ${playerName}`);
             const newPlayerId = uuidv4();
             players[newPlayerId] = { socketId: socket.id, playerName: playerName, tableId: null, disconnected: false };
             sockets[socket.id] = newPlayerId;
             socket.emit("assignedPlayerId", { playerId: newPlayerId, playerName: playerName });
         }
+    });
+
+    socket.on('changeName', ({ newName }) => {
+        const playerId = sockets[socket.id];
+        if (!playerId || !players[playerId]) return;
+        
+        const oldName = players[playerId].playerName;
+        players[playerId].playerName = newName;
+
+        console.log(`[${SERVER_VERSION}] Player ${oldName} (${playerId}) changed name to ${newName}`);
+        socket.emit("nameChanged", { newName });
+        
+        // If they are at a table, update their name there too
+        const tableId = players[playerId].tableId;
+        if(tableId && tables[tableId] && tables[tableId].players[playerId]){
+            tables[tableId].players[playerId].playerName = newName;
+            emitTableUpdate(tableId);
+        }
+        emitLobbyUpdate();
     });
 
     socket.on("joinTable", ({ tableId }) => {
@@ -428,14 +423,59 @@ io.on("connection", (socket) => {
 
         if (table.state !== "Bidding Phase") return socket.emit("errorMessage", "Not in Bidding Phase.");
         if (pName !== table.biddingTurnPlayerName) return socket.emit("errorMessage", "Not your turn to bid.");
-        
-        console.log(`[${SERVER_VERSION}][${table.tableId}] Player ${pName} bid ${bid}`);
+        if (!BID_HIERARCHY.includes(bid)) return socket.emit("errorMessage", "Invalid bid type.");
+        if (table.playersWhoPassedThisRound.includes(pName)) return socket.emit("errorMessage", "You have already passed.");
 
-        table.bidsThisRound.push({ playerId: playerId, playerName: pName, bidValue: bid });
+        const currentHighestBidIndex = table.currentHighestBidDetails ? BID_HIERARCHY.indexOf(table.currentHighestBidDetails.bid) : -1;
+        if (bid !== "Pass" && BID_HIERARCHY.indexOf(bid) <= currentHighestBidIndex) return socket.emit("errorMessage", "Bid is not higher than current highest bid.");
         
-        const currentBidderIndex = table.playerOrderActive.indexOf(pName);
-        const nextBidderIndex = (currentBidderIndex + 1) % table.playerOrderActive.length;
-        table.biddingTurnPlayerName = table.playerOrderActive[nextBidderIndex];
+        table.bidsThisRound.push({ playerId: playerId, playerName: pName, bidValue: bid });
+        if (bid !== "Pass") {
+          table.currentHighestBidDetails = { playerId: playerId, playerName: pName, bid };
+        } else {
+            if (!table.playersWhoPassedThisRound.includes(pName)) {
+                table.playersWhoPassedThisRound.push(pName);
+            }
+        }
+        
+        // Determine if bidding is over
+        const activeBiddersRemaining = table.playerOrderActive.filter(playerName => !table.playersWhoPassedThisRound.includes(playerName));
+        let endBidding = false;
+        if (activeBiddersRemaining.length <= 1) {
+            endBidding = true;
+        }
+        if (table.playersWhoPassedThisRound.length === table.playerOrderActive.length) {
+            endBidding = true;
+        }
+        
+        if (endBidding) {
+            table.biddingTurnPlayerName = null;
+            // Resolve bidding - you would have a function for this
+            if (table.currentHighestBidDetails) {
+                 table.bidWinnerInfo = { ...table.currentHighestBidDetails };
+                 // Transition to next state based on bid (e.g., Playing Phase, Trump Selection)
+                 // For now, let's just log it
+                 console.log(`[${SERVER_VERSION}][${table.tableId}] Bid winner is ${table.bidWinnerInfo.playerName} with ${table.bidWinnerInfo.bid}`);
+                 table.state = "Playing Phase"; // Placeholder for proper transition
+                 table.trickLeaderName = table.bidWinnerInfo.playerName;
+                 table.trickTurnPlayerName = table.bidWinnerInfo.playerName;
+            } else {
+                console.log(`[${SERVER_VERSION}][${table.tableId}] All players passed. Round skipped.`);
+                table.state = "Round Skipped";
+                // Add logic to start next round after a delay
+            }
+        } else {
+            let currentBidderIndex = table.playerOrderActive.indexOf(pName);
+            let nextBidderName = null;
+            for (let i = 1; i < table.playerOrderActive.length; i++) {
+                let potentialNextBidder = table.playerOrderActive[(currentBidderIndex + i) % table.playerOrderActive.length];
+                if (!table.playersWhoPassedThisRound.includes(potentialNextBidder)) {
+                    nextBidderName = potentialNextBidder;
+                    break;
+                }
+            }
+            table.biddingTurnPlayerName = nextBidderName;
+        }
         
         emitTableUpdate(table.tableId);
     });
@@ -531,3 +571,4 @@ io.on("connection", (socket) => {
 const PORT = process.env.PORT || 3000;
 app.get("/", (req, res) => { res.send(`Sluff Game Server (${SERVER_VERSION}) is Running!`); });
 server.listen(PORT, () => { console.log(`Sluff Game Server (${SERVER_VERSION}) running on http://localhost:${PORT}`); });
+
