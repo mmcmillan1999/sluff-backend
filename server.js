@@ -1,4 +1,4 @@
-// --- Backend/server.js (v4.6.1) ---
+// --- Backend/server.js (v4.6.2) ---
 require("dotenv").config();
 const http = require("http");
 const { Server } = require("socket.io");
@@ -10,7 +10,7 @@ const app = express();
 const server = http.createServer(app);
 
 // --- VERSION UPDATED ---
-const SERVER_VERSION = "4.6.1 - Fixed Dealer Rotation & Round Setup";
+const SERVER_VERSION = "4.6.2 - Final Insurance & Stability Fixes";
 console.log(`SLUFF SERVER (${SERVER_VERSION}): Initializing...`);
 
 const io = new Server(server, {
@@ -602,16 +602,10 @@ function calculateRoundScores(tableId) {
     let roundMessage = "";
     if (insurance.dealExecuted) {
         const agreement = insurance.executedDetails.agreement;
-        const pointsExchanged = {};
-        const bidderGain = agreement.bidderRequirement;
-        scores[agreement.bidderPlayerName] += bidderGain;
-        pointsExchanged[agreement.bidderPlayerName] = bidderGain;
+        scores[agreement.bidderPlayerName] += agreement.bidderRequirement;
         for (const defenderName in agreement.defenderOffers) {
-            const offerValue = agreement.defenderOffers[defenderName];
-            scores[defenderName] -= offerValue;
-            pointsExchanged[defenderName] = -offerValue;
+            scores[defenderName] -= agreement.defenderOffers[defenderName];
         }
-        insurance.executedDetails.pointsExchanged = pointsExchanged;
         roundMessage = `Insurance deal executed. Points exchanged based on agreement.`;
     } else {
         const scoreDifferenceFrom60 = bidderTotalCardPoints - 60;
@@ -625,8 +619,14 @@ function calculateRoundScores(tableId) {
     const finalPlayerScores = Object.entries(scores).filter(([key]) => key !== PLACEHOLDER_ID);
     if(finalPlayerScores.some(([,score]) => score <= 0)) {
         isGameOver = true;
-        gameWinner = finalPlayerScores.sort((a,b) => b[1] - a[1])[0][0];
-        roundMessage += ` GAME OVER! Winner: ${gameWinner}.`;
+        const sortedScores = finalPlayerScores.sort((a,b) => b[1] - a[1]);
+        if (sortedScores.length > 0) {
+            gameWinner = sortedScores[0][0];
+            roundMessage += ` GAME OVER! Winner: ${gameWinner}.`;
+        } else {
+            gameWinner = "N/A";
+            roundMessage += ` GAME OVER! No winner could be determined.`;
+        }
         table.state = "Game Over";
     } else {
         table.state = "Awaiting Next Round Trigger";
