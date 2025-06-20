@@ -1,4 +1,4 @@
-// --- Backend/server.js (v4.6.3) ---
+// --- Backend/server.js (v4.7.0) ---
 require("dotenv").config();
 const http = require("http");
 const { Server } = require("socket.io");
@@ -9,8 +9,7 @@ const { v4: uuidv4 } = require('uuid');
 const app = express();
 const server = http.createServer(app);
 
-// --- VERSION UPDATED ---
-const SERVER_VERSION = "4.6.3 - Fixed Insurance Scoring Crash";
+const SERVER_VERSION = "4.7.0 - Final Insurance & Crash Fixes";
 console.log(`SLUFF SERVER (${SERVER_VERSION}): Initializing...`);
 
 const io = new Server(server, {
@@ -587,12 +586,12 @@ function determineTrickWinner(trickCards, leadSuit, trumpSuit) {
 function calculateRoundScores(tableId) {
     const table = tables[tableId];
     if (!table || !table.bidWinnerInfo) return;
-
     const { bidWinnerInfo, playerOrderActive, playerMode, scores, capturedTricks, widowDiscardsForFrogBidder, originalDealtWidow, trickLeaderName, insurance } = table;
     const bidWinnerName = bidWinnerInfo.playerName;
     const bidType = bidWinnerInfo.bid;
     const currentBidMultiplier = BID_MULTIPLIERS[bidType];
     
+    // --- FIX: Initialize variables at the top to prevent reference errors ---
     let bidderTotalCardPoints = 0;
     let defendersTotalCardPoints = 0;
     let awardedWidowInfo = { cards: [], points: 0, awardedTo: null };
@@ -624,12 +623,9 @@ function calculateRoundScores(tableId) {
     let isGameOver = false;
     let gameWinner = null;
     const finalPlayerScores = Object.entries(scores).filter(([key]) => key !== PLACEHOLDER_ID);
-
     if(finalPlayerScores.some(([,score]) => score <= 0)) {
         isGameOver = true;
         const sortedScores = finalPlayerScores.sort((a,b) => b[1] - a[1]);
-        
-        // --- FIX: Add a check to prevent crashing on an empty scores array ---
         if (sortedScores.length > 0) {
             gameWinner = sortedScores[0][0];
             roundMessage += ` GAME OVER! Winner: ${gameWinner}.`;
@@ -641,7 +637,6 @@ function calculateRoundScores(tableId) {
     } else {
         table.state = "Awaiting Next Round Trigger";
     }
-
     table.roundSummary = { bidWinnerName, bidType, trumpSuit: table.trumpSuit, bidderCardPoints, defenderCardPoints, awardedWidowInfo, bidMadeSuccessfully, scoresBeforeExchange, finalScores: scores, isGameOver, gameWinner, message: roundMessage, dealerOfRoundId: table.dealer };
     emitTableUpdate(tableId);
 }
