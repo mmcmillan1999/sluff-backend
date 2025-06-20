@@ -1,4 +1,4 @@
-// --- Backend/server.js (v4.7.1) ---
+// --- Backend/server.js (v4.7.2) ---
 require("dotenv").config();
 const http = require("http");
 const { Server } = require("socket.io");
@@ -10,7 +10,7 @@ const app = express();
 const server = http.createServer(app);
 
 // --- VERSION UPDATED ---
-const SERVER_VERSION = "4.7.1 - Final Insurance & Crash Fixes";
+const SERVER_VERSION = "4.7.2 - Fixed Round End Crash";
 console.log(`SLUFF SERVER (${SERVER_VERSION}): Initializing...`);
 
 const io = new Server(server, {
@@ -582,7 +582,7 @@ function determineTrickWinner(trickCards, leadSuit, trumpSuit) {
     return winningPlay ? winningPlay.playerName : null;
 }
 
-// --- MODIFIED FUNCTION ---
+// --- BUG FIX APPLIED IN THIS FUNCTION ---
 function calculateRoundScores(tableId) {
     const table = tables[tableId];
     if (!table || !table.bidWinnerInfo) return;
@@ -638,10 +638,24 @@ function calculateRoundScores(tableId) {
     }
 
     table.roundSummary = {
-        bidWinnerName, bidType, trumpSuit: table.trumpSuit, bidderCardPoints, defenderCardPoints, awardedWidowInfo, bidMadeSuccessfully,
-        scoresBeforeExchange, finalScores: scores, isGameOver, gameWinner, message: roundMessage,
+        bidWinnerName,
+        bidType,
+        trumpSuit: table.trumpSuit,
+        // --- BUG FIX START ---
+        // The error was here. The local variables are bidderTotalCardPoints and
+        // defendersTotalCardPoints, but shorthand was used for different names.
+        // This explicitly assigns the correct variables to the summary object properties.
+        bidderCardPoints: bidderTotalCardPoints,
+        defenderCardPoints: defendersTotalCardPoints,
+        // --- BUG FIX END ---
+        awardedWidowInfo,
+        bidMadeSuccessfully,
+        scoresBeforeExchange,
+        finalScores: scores,
+        isGameOver,
+        gameWinner,
+        message: roundMessage,
         dealerOfRoundId: table.dealer,
-        // --- NEW: Add insurance deal info to the summary ---
         insuranceDealWasMade: insurance.dealExecuted,
         insuranceDetails: insurance.dealExecuted ? insurance.executedDetails : null,
     };
