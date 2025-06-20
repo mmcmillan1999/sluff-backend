@@ -1,4 +1,4 @@
-// --- Backend/server.js (v4.7.0) ---
+// --- Backend/server.js (v4.7.1) ---
 require("dotenv").config();
 const http = require("http");
 const { Server } = require("socket.io");
@@ -10,7 +10,7 @@ const app = express();
 const server = http.createServer(app);
 
 // --- VERSION UPDATED ---
-const SERVER_VERSION = "4.7.0 - Final Insurance & Crash Fixes";
+const SERVER_VERSION = "4.7.1 - Final Insurance & Crash Fixes";
 console.log(`SLUFF SERVER (${SERVER_VERSION}): Initializing...`);
 
 const io = new Server(server, {
@@ -161,7 +161,6 @@ function transitionToPlayingPhase(table) {
         defenders.forEach(defName => {
             table.insurance.defenderOffers[defName] = -60 * multiplier;
         });
-        console.log(`[${table.tableId}] INSURANCE ACTIVATED for ${table.bidWinnerInfo.playerName}.`);
     }
     emitTableUpdate(table.tableId);
 }
@@ -592,13 +591,11 @@ function calculateRoundScores(tableId) {
     const bidType = bidWinnerInfo.bid;
     const currentBidMultiplier = BID_MULTIPLIERS[bidType];
     
-    // --- FIX: Initialize variables at the top to prevent reference errors ---
     let bidderTotalCardPoints = 0;
     let defendersTotalCardPoints = 0;
     let awardedWidowInfo = { cards: [], points: 0, awardedTo: null };
     let roundMessage = "";
     
-    // Card points are always tallied, as the hand is always played out.
     if (bidType === "Frog") { awardedWidowInfo.cards = [...widowDiscardsForFrogBidder]; awardedWidowInfo.points = calculateCardPoints(awardedWidowInfo.cards); bidderTotalCardPoints += awardedWidowInfo.points; awardedWidowInfo.awardedTo = bidWinnerName; } 
     else if (bidType === "Solo") { awardedWidowInfo.cards = [...originalDealtWidow]; awardedWidowInfo.points = calculateCardPoints(awardedWidowInfo.cards); bidderTotalCardPoints += awardedWidowInfo.points; awardedWidowInfo.awardedTo = bidWinnerName; } 
     else if (bidType === "Heart Solo") { awardedWidowInfo.cards = [...originalDealtWidow]; awardedWidowInfo.points = calculateCardPoints(awardedWidowInfo.cards); if (trickLeaderName === bidWinnerName) { bidderTotalCardPoints += awardedWidowInfo.points; awardedWidowInfo.awardedTo = bidWinnerName; } else { defendersTotalCardPoints += awardedWidowInfo.points; awardedWidowInfo.awardedTo = trickLeaderName; } }
@@ -639,7 +636,15 @@ function calculateRoundScores(tableId) {
     } else {
         table.state = "Awaiting Next Round Trigger";
     }
-    table.roundSummary = { bidWinnerName, bidType, trumpSuit: table.trumpSuit, bidderCardPoints, defenderCardPoints, awardedWidowInfo, bidMadeSuccessfully, scoresBeforeExchange, finalScores: scores, isGameOver, gameWinner, message: roundMessage, dealerOfRoundId: table.dealer };
+
+    table.roundSummary = {
+        bidWinnerName, bidType, trumpSuit: table.trumpSuit, bidderCardPoints, defenderCardPoints, awardedWidowInfo, bidMadeSuccessfully,
+        scoresBeforeExchange, finalScores: scores, isGameOver, gameWinner, message: roundMessage,
+        dealerOfRoundId: table.dealer,
+        // --- NEW: Add insurance deal info to the summary ---
+        insuranceDealWasMade: insurance.dealExecuted,
+        insuranceDetails: insurance.dealExecuted ? insurance.executedDetails : null,
+    };
     emitTableUpdate(tableId);
 }
 
