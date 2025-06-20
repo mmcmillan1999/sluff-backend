@@ -587,18 +587,17 @@ function determineTrickWinner(trickCards, leadSuit, trumpSuit) {
 function calculateRoundScores(tableId) {
     const table = tables[tableId];
     if (!table || !table.bidWinnerInfo) return;
+
     const { bidWinnerInfo, playerOrderActive, playerMode, scores, capturedTricks, widowDiscardsForFrogBidder, originalDealtWidow, trickLeaderName, insurance } = table;
     const bidWinnerName = bidWinnerInfo.playerName;
     const bidType = bidWinnerInfo.bid;
     const currentBidMultiplier = BID_MULTIPLIERS[bidType];
     
-    // --- FIX: Initialize variables at the top to prevent reference errors ---
     let bidderTotalCardPoints = 0;
     let defendersTotalCardPoints = 0;
     let awardedWidowInfo = { cards: [], points: 0, awardedTo: null };
     let roundMessage = "";
     
-    // Card points are always tallied, as the hand is always played out.
     if (bidType === "Frog") { awardedWidowInfo.cards = [...widowDiscardsForFrogBidder]; awardedWidowInfo.points = calculateCardPoints(awardedWidowInfo.cards); bidderTotalCardPoints += awardedWidowInfo.points; awardedWidowInfo.awardedTo = bidWinnerName; } 
     else if (bidType === "Solo") { awardedWidowInfo.cards = [...originalDealtWidow]; awardedWidowInfo.points = calculateCardPoints(awardedWidowInfo.cards); bidderTotalCardPoints += awardedWidowInfo.points; awardedWidowInfo.awardedTo = bidWinnerName; } 
     else if (bidType === "Heart Solo") { awardedWidowInfo.cards = [...originalDealtWidow]; awardedWidowInfo.points = calculateCardPoints(awardedWidowInfo.cards); if (trickLeaderName === bidWinnerName) { bidderTotalCardPoints += awardedWidowInfo.points; awardedWidowInfo.awardedTo = bidWinnerName; } else { defendersTotalCardPoints += awardedWidowInfo.points; awardedWidowInfo.awardedTo = trickLeaderName; } }
@@ -625,9 +624,12 @@ function calculateRoundScores(tableId) {
     let isGameOver = false;
     let gameWinner = null;
     const finalPlayerScores = Object.entries(scores).filter(([key]) => key !== PLACEHOLDER_ID);
+
     if(finalPlayerScores.some(([,score]) => score <= 0)) {
         isGameOver = true;
         const sortedScores = finalPlayerScores.sort((a,b) => b[1] - a[1]);
+        
+        // --- FIX: Add a check to prevent crashing on an empty scores array ---
         if (sortedScores.length > 0) {
             gameWinner = sortedScores[0][0];
             roundMessage += ` GAME OVER! Winner: ${gameWinner}.`;
@@ -639,6 +641,7 @@ function calculateRoundScores(tableId) {
     } else {
         table.state = "Awaiting Next Round Trigger";
     }
+
     table.roundSummary = { bidWinnerName, bidType, trumpSuit: table.trumpSuit, bidderCardPoints, defenderCardPoints, awardedWidowInfo, bidMadeSuccessfully, scoresBeforeExchange, finalScores: scores, isGameOver, gameWinner, message: roundMessage, dealerOfRoundId: table.dealer };
     emitTableUpdate(tableId);
 }
