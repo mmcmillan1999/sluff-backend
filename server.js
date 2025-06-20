@@ -1,4 +1,4 @@
-// --- Backend/server.js (v4.6.2) ---
+// --- Backend/server.js (v4.6.3) ---
 require("dotenv").config();
 const http = require("http");
 const { Server } = require("socket.io");
@@ -10,7 +10,7 @@ const app = express();
 const server = http.createServer(app);
 
 // --- VERSION UPDATED ---
-const SERVER_VERSION = "4.6.2 - Fixed End-of-Round Crash";
+const SERVER_VERSION = "4.6.3 - Fixed Insurance Scoring Crash";
 console.log(`SLUFF SERVER (${SERVER_VERSION}): Initializing...`);
 
 const io = new Server(server, {
@@ -583,6 +583,7 @@ function determineTrickWinner(trickCards, leadSuit, trumpSuit) {
     return winningPlay ? winningPlay.playerName : null;
 }
 
+// --- MODIFIED FUNCTION ---
 function calculateRoundScores(tableId) {
     const table = tables[tableId];
     if (!table || !table.bidWinnerInfo) return;
@@ -590,16 +591,22 @@ function calculateRoundScores(tableId) {
     const bidWinnerName = bidWinnerInfo.playerName;
     const bidType = bidWinnerInfo.bid;
     const currentBidMultiplier = BID_MULTIPLIERS[bidType];
+    
+    // --- FIX: Initialize variables at the top to prevent reference errors ---
     let bidderTotalCardPoints = 0;
     let defendersTotalCardPoints = 0;
     let awardedWidowInfo = { cards: [], points: 0, awardedTo: null };
+    let roundMessage = "";
+    
+    // Card points are always tallied, as the hand is always played out.
     if (bidType === "Frog") { awardedWidowInfo.cards = [...widowDiscardsForFrogBidder]; awardedWidowInfo.points = calculateCardPoints(awardedWidowInfo.cards); bidderTotalCardPoints += awardedWidowInfo.points; awardedWidowInfo.awardedTo = bidWinnerName; } 
     else if (bidType === "Solo") { awardedWidowInfo.cards = [...originalDealtWidow]; awardedWidowInfo.points = calculateCardPoints(awardedWidowInfo.cards); bidderTotalCardPoints += awardedWidowInfo.points; awardedWidowInfo.awardedTo = bidWinnerName; } 
     else if (bidType === "Heart Solo") { awardedWidowInfo.cards = [...originalDealtWidow]; awardedWidowInfo.points = calculateCardPoints(awardedWidowInfo.cards); if (trickLeaderName === bidWinnerName) { bidderTotalCardPoints += awardedWidowInfo.points; awardedWidowInfo.awardedTo = bidWinnerName; } else { defendersTotalCardPoints += awardedWidowInfo.points; awardedWidowInfo.awardedTo = trickLeaderName; } }
     playerOrderActive.forEach(pName => { const capturedCards = (capturedTricks[pName] || []).flat(); const playerTrickPoints = calculateCardPoints(capturedCards); if (pName === bidWinnerName) { bidderTotalCardPoints += playerTrickPoints; } else { defendersTotalCardPoints += playerTrickPoints; } });
+    
     const bidMadeSuccessfully = bidderTotalCardPoints > 60;
     const scoresBeforeExchange = JSON.parse(JSON.stringify(scores));
-    let roundMessage = "";
+    
     if (insurance.dealExecuted) {
         const agreement = insurance.executedDetails.agreement;
         scores[agreement.bidderPlayerName] += agreement.bidderRequirement;
@@ -614,6 +621,7 @@ function calculateRoundScores(tableId) {
         else if (bidMadeSuccessfully) { let totalPointsGained = 0; playerOrderActive.forEach(pName => { if (pName !== bidWinnerName) { scores[pName] -= exchangeValue; totalPointsGained += exchangeValue; } }); scores[bidWinnerName] += totalPointsGained; roundMessage = `${bidWinnerName} succeeded! Gains ${totalPointsGained} points.`; } 
         else { let totalPointsLost = 0; const activeOpponents = playerOrderActive.filter(pName => pName !== bidWinnerName); activeOpponents.forEach(oppName => { scores[oppName] += exchangeValue; totalPointsLost += exchangeValue; }); if (playerMode === 3) { scores[PLACEHOLDER_ID] += exchangeValue; totalPointsLost += exchangeValue; } else if (playerMode === 4) { const dealerName = getPlayerNameByPlayerId(table.dealer, table); if (dealerName && !playerOrderActive.includes(dealerName)) { scores[dealerName] += exchangeValue; totalPointsLost += exchangeValue; } } scores[bidWinnerName] -= totalPointsLost; roundMessage = `${bidWinnerName} failed. Loses ${totalPointsLost} points.`; }
     }
+
     let isGameOver = false;
     let gameWinner = null;
     const finalPlayerScores = Object.entries(scores).filter(([key]) => key !== PLACEHOLDER_ID);
