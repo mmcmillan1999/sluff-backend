@@ -10,7 +10,7 @@ const app = express();
 const server = http.createServer(app);
 
 // --- VERSION UPDATED ---
-const SERVER_VERSION = "4.6.2 - Final Insurance & Stability Fixes";
+const SERVER_VERSION = "4.6.2 - Fixed End-of-Round Crash";
 console.log(`SLUFF SERVER (${SERVER_VERSION}): Initializing...`);
 
 const io = new Server(server, {
@@ -485,7 +485,7 @@ io.on("connection", (socket) => {
     socket.on("requestNextRound", ({ tableId }) => {
         const table = tables[tableId];
         const playerId = sockets[socket.id];
-        if (table && table.state === "Awaiting Next Round Trigger" && playerId === table.dealer) {
+        if (table && table.state === "Awaiting Next Round Trigger" && playerId === table.roundSummary?.dealerOfRoundId) {
             prepareNextRound(tableId);
         } else {
             socket.emit("error", "Cannot start next round: Not the correct state or you are not the dealer.");
