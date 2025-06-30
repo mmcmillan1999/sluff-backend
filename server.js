@@ -1,4 +1,4 @@
-// --- Backend/server.js (v4.9.1) ---
+// --- Backend/server.js (v4.9.3) ---
 require("dotenv").config();
 const http = require("http");
 const { Server } = require("socket.io");
@@ -9,7 +9,7 @@ const { v4: uuidv4 } = require('uuid');
 const app = express();
 const server = http.createServer(app);
 
-const SERVER_VERSION = "4.9.1 - Insurance Hindsight & All-Pass Reveal";
+const SERVER_VERSION = "4.9.3 - Fixed All-Pass Disconnect Bug";
 console.log(`SLUFF SERVER (${SERVER_VERSION}): Initializing...`);
 
 const io = new Server(server, {
@@ -166,15 +166,48 @@ function transitionToPlayingPhase(table) {
 
 function resolveBiddingFinal(table) {
     if (!table.currentHighestBidDetails) {
+        // --- ALL PASS SCENARIO ---
         table.state = "AllPassWidowReveal";
         emitTableUpdate(table.tableId);
-        setTimeout(() => { 
+        
+        // After a delay, set up the next deal without calling the complex prepareNextRound function
+        setTimeout(() => {
             const currentTable = tables[table.tableId];
             if(currentTable && currentTable.state === "AllPassWidowReveal"){
-                prepareNextRound(table.tableId); 
+                const allPlayerIds = Object.keys(currentTable.players).filter(pId => !currentTable.players[pId].isSpectator && !currentTable.players[pId].disconnected);
+                if (allPlayerIds.length < 3) {
+                    return resetTable(currentTable.tableId, true);
+                }
+                
+                // 1. Advance the dealer
+                const lastDealerId = currentTable.dealer;
+                const lastDealerIndex = allPlayerIds.indexOf(lastDealerId);
+                const nextDealerIndex = (lastDealerIndex + 1) % allPlayerIds.length;
+                currentTable.dealer = allPlayerIds[nextDealerIndex];
+                
+                // 2. Re-populate playerOrderActive based on the new dealer
+                currentTable.playerOrderActive = [];
+                const currentDealerIndex = allPlayerIds.indexOf(currentTable.dealer);
+                 if (currentTable.playerMode === 4) {
+                    for (let i = 1; i <= 3; i++) {
+                        currentTable.playerOrderActive.push(getPlayerNameByPlayerId(allPlayerIds[(currentDealerIndex + i) % 4], currentTable));
+                    }
+                } else {
+                    for (let i = 1; i <= 3; i++) {
+                        currentTable.playerOrderActive.push(getPlayerNameByPlayerId(allPlayerIds[(currentDealerIndex + i) % 3], currentTable));
+                    }
+                }
+
+                // 3. Reset round-specific state
+                initializeNewRoundState(currentTable);
+                
+                // 4. Set state to Dealing Pending and emit
+                currentTable.state = "Dealing Pending";
+                emitTableUpdate(currentTable.tableId);
             }
         }, 5000);
     } else {
+        // --- REGULAR BID SCENARIO ---
         table.bidWinnerInfo = { ...table.currentHighestBidDetails };
         const bid = table.bidWinnerInfo.bid;
         if (bid === "Frog") { table.trumpSuit = "H"; table.state = "FrogBidderConfirmWidow"; } 
@@ -713,11 +746,12 @@ function prepareNextRound(tableId) {
     const table = tables[tableId];
     if (!table || !table.gameStarted) return;
     const lastDealerId = table.roundSummary?.dealerOfRoundId || table.dealer;
-    const allPlayerIds = Object.keys(table.players).filter(pId => !table.players[pId].isSpectator && !p.disconnected);
+    const allPlayerIds = Object.keys(table.players).filter(pId => !table.players[pId].isSpectator && !table.players[pId].disconnected);
     if (allPlayerIds.length < 3) { return resetTable(tableId, true); }
     const lastDealerIndex = allPlayerIds.indexOf(lastDealerId);
-    const nextDealerIndex = (lastDealerIndex !== -1 ? lastDealerIndex + 1 : 1) % allPlayerIds.length;
+    const nextDealerIndex = (lastDealerIndex + 1) % allPlayerIds.length;
     table.dealer = allPlayerIds[nextDealerIndex];
+    
     table.playerOrderActive = [];
     const currentDealerIndex = allPlayerIds.indexOf(table.dealer);
     if (table.playerMode === 4) {
