@@ -1,4 +1,4 @@
-// --- Backend/server.js (v4.7.2) ---
+// --- Backend/server.js (v4.9.1) ---
 require("dotenv").config();
 const http = require("http");
 const { Server } = require("socket.io");
@@ -9,8 +9,7 @@ const { v4: uuidv4 } = require('uuid');
 const app = express();
 const server = http.createServer(app);
 
-// --- VERSION UPDATED ---
-const SERVER_VERSION = "4.7.2 - Fixed Round End Crash";
+const SERVER_VERSION = "4.9.1 - Insurance Hindsight & All-Pass Reveal";
 console.log(`SLUFF SERVER (${SERVER_VERSION}): Initializing...`);
 
 const io = new Server(server, {
@@ -167,18 +166,24 @@ function transitionToPlayingPhase(table) {
 
 function resolveBiddingFinal(table) {
     if (!table.currentHighestBidDetails) {
-        table.state = "Round Skipped";
-        setTimeout(() => { if (tables[table.tableId]?.state === "Round Skipped") { prepareNextRound(table.tableId); } }, 5000);
+        table.state = "AllPassWidowReveal";
+        emitTableUpdate(table.tableId);
+        setTimeout(() => { 
+            const currentTable = tables[table.tableId];
+            if(currentTable && currentTable.state === "AllPassWidowReveal"){
+                prepareNextRound(table.tableId); 
+            }
+        }, 5000);
     } else {
         table.bidWinnerInfo = { ...table.currentHighestBidDetails };
         const bid = table.bidWinnerInfo.bid;
         if (bid === "Frog") { table.trumpSuit = "H"; table.state = "FrogBidderConfirmWidow"; } 
         else if (bid === "Heart Solo") { table.trumpSuit = "H"; transitionToPlayingPhase(table); } 
         else if (bid === "Solo") { table.state = "Trump Selection"; }
+         emitTableUpdate(table.tableId);
     }
     table.originalFrogBidderId = null;
     table.soloBidMadeAfterFrog = false;
-    emitTableUpdate(table.tableId);
 }
 
 function checkForFrogUpgrade(table) {
@@ -582,7 +587,6 @@ function determineTrickWinner(trickCards, leadSuit, trumpSuit) {
     return winningPlay ? winningPlay.playerName : null;
 }
 
-// --- BUG FIX APPLIED IN THIS FUNCTION ---
 function calculateRoundScores(tableId) {
     const table = tables[tableId];
     if (!table || !table.bidWinnerInfo) return;
@@ -594,16 +598,55 @@ function calculateRoundScores(tableId) {
     let bidderTotalCardPoints = 0;
     let defendersTotalCardPoints = 0;
     let awardedWidowInfo = { cards: [], points: 0, awardedTo: null };
-    let roundMessage = "";
     
     if (bidType === "Frog") { awardedWidowInfo.cards = [...widowDiscardsForFrogBidder]; awardedWidowInfo.points = calculateCardPoints(awardedWidowInfo.cards); bidderTotalCardPoints += awardedWidowInfo.points; awardedWidowInfo.awardedTo = bidWinnerName; } 
     else if (bidType === "Solo") { awardedWidowInfo.cards = [...originalDealtWidow]; awardedWidowInfo.points = calculateCardPoints(awardedWidowInfo.cards); bidderTotalCardPoints += awardedWidowInfo.points; awardedWidowInfo.awardedTo = bidWinnerName; } 
     else if (bidType === "Heart Solo") { awardedWidowInfo.cards = [...originalDealtWidow]; awardedWidowInfo.points = calculateCardPoints(awardedWidowInfo.cards); if (trickLeaderName === bidWinnerName) { bidderTotalCardPoints += awardedWidowInfo.points; awardedWidowInfo.awardedTo = bidWinnerName; } else { defendersTotalCardPoints += awardedWidowInfo.points; awardedWidowInfo.awardedTo = trickLeaderName; } }
     playerOrderActive.forEach(pName => { const capturedCards = (capturedTricks[pName] || []).flat(); const playerTrickPoints = calculateCardPoints(capturedCards); if (pName === bidWinnerName) { bidderTotalCardPoints += playerTrickPoints; } else { defendersTotalCardPoints += playerTrickPoints; } });
     
-    const bidMadeSuccessfully = bidderTotalCardPoints > 60;
     const scoresBeforeExchange = JSON.parse(JSON.stringify(scores));
-    
+    let roundMessage = "";
+    let insuranceHindsight = null;
+
+    if (playerMode === 3) {
+        insuranceHindsight = {};
+        const scoreDifferenceFrom60 = bidderTotalCardPoints - 60;
+        const exchangeValue = Math.abs(scoreDifferenceFrom60) * currentBidMultiplier;
+        
+        const hypotheticalPlayedOutChanges = {};
+        if (scoreDifferenceFrom60 !== 0) {
+            if (bidderTotalCardPoints > 60) {
+                hypotheticalPlayedOutChanges[bidWinnerName] = exchangeValue * 2;
+                playerOrderActive.filter(p => p !== bidWinnerName).forEach(def => hypotheticalPlayedOutChanges[def] = -exchangeValue);
+            } else {
+                hypotheticalPlayedOutChanges[bidWinnerName] = -exchangeValue * 3;
+                playerOrderActive.filter(p => p !== bidWinnerName).forEach(def => hypotheticalPlayedOutChanges[def] = exchangeValue);
+                hypotheticalPlayedOutChanges[PLACEHOLDER_ID] = exchangeValue;
+            }
+        }
+
+        const hypotheticalInsuranceChanges = {};
+        const agreement = insurance.dealExecuted ? insurance.executedDetails.agreement : { bidderRequirement: insurance.bidderRequirement, defenderOffers: insurance.defenderOffers };
+        hypotheticalInsuranceChanges[bidWinnerName] = agreement.bidderRequirement;
+        for (const defenderName in agreement.defenderOffers) {
+             hypotheticalInsuranceChanges[defenderName] = -agreement.defenderOffers[defenderName];
+        }
+
+        if (insurance.dealExecuted) {
+            playerOrderActive.forEach(pName => {
+                const insuranceChange = hypotheticalInsuranceChanges[pName] || 0;
+                const playedOutChange = hypotheticalPlayedOutChanges[pName] || 0;
+                insuranceHindsight[pName] = insuranceChange - playedOutChange;
+            });
+        } else {
+             playerOrderActive.forEach(pName => {
+                const playedOutChange = hypotheticalPlayedOutChanges[pName] || 0;
+                const insuranceChange = hypotheticalInsuranceChanges[pName] || 0;
+                insuranceHindsight[pName] = insuranceChange - playedOutChange;
+            });
+        }
+    }
+
     if (insurance.dealExecuted) {
         const agreement = insurance.executedDetails.agreement;
         scores[agreement.bidderPlayerName] += agreement.bidderRequirement;
@@ -615,58 +658,62 @@ function calculateRoundScores(tableId) {
         const scoreDifferenceFrom60 = bidderTotalCardPoints - 60;
         const exchangeValue = Math.abs(scoreDifferenceFrom60) * currentBidMultiplier;
         if (scoreDifferenceFrom60 === 0) { roundMessage = `${bidWinnerName} scored exactly 60. No points exchanged.`; } 
-        else if (bidMadeSuccessfully) { let totalPointsGained = 0; playerOrderActive.forEach(pName => { if (pName !== bidWinnerName) { scores[pName] -= exchangeValue; totalPointsGained += exchangeValue; } }); scores[bidWinnerName] += totalPointsGained; roundMessage = `${bidWinnerName} succeeded! Gains ${totalPointsGained} points.`; } 
-        else { let totalPointsLost = 0; const activeOpponents = playerOrderActive.filter(pName => pName !== bidWinnerName); activeOpponents.forEach(oppName => { scores[oppName] += exchangeValue; totalPointsLost += exchangeValue; }); if (playerMode === 3) { scores[PLACEHOLDER_ID] += exchangeValue; totalPointsLost += exchangeValue; } else if (playerMode === 4) { const dealerName = getPlayerNameByPlayerId(table.dealer, table); if (dealerName && !playerOrderActive.includes(dealerName)) { scores[dealerName] += exchangeValue; totalPointsLost += exchangeValue; } } scores[bidWinnerName] -= totalPointsLost; roundMessage = `${bidWinnerName} failed. Loses ${totalPointsLost} points.`; }
+        else if (bidderTotalCardPoints > 60) {
+            let totalPointsGained = 0;
+            playerOrderActive.forEach(pName => { if (pName !== bidWinnerName) { scores[pName] -= exchangeValue; totalPointsGained += exchangeValue; } });
+            scores[bidWinnerName] += totalPointsGained;
+            roundMessage = `${bidWinnerName} succeeded! Gains ${totalPointsGained} points.`;
+        } else {
+            let totalPointsLost = 0;
+            const activeOpponents = playerOrderActive.filter(pName => pName !== bidWinnerName);
+            activeOpponents.forEach(oppName => { scores[oppName] += exchangeValue; totalPointsLost += exchangeValue; });
+            if (playerMode === 3) { scores[PLACEHOLDER_ID] += exchangeValue; totalPointsLost += exchangeValue; }
+            else if (playerMode === 4) { const dealerName = getPlayerNameByPlayerId(table.dealer, table); if (dealerName && !playerOrderActive.includes(dealerName)) { scores[dealerName] += exchangeValue; totalPointsLost += exchangeValue; } }
+            scores[bidWinnerName] -= totalPointsLost;
+            roundMessage = `${bidWinnerName} failed. Loses ${totalPointsLost} points.`;
+        }
     }
 
     let isGameOver = false;
     let gameWinner = null;
-    const finalPlayerScores = Object.entries(scores).filter(([key]) => key !== PLACEHOLDER_ID);
-    if(finalPlayerScores.some(([,score]) => score <= 0)) {
+    if(Object.values(scores).some(score => score <= 0)) {
         isGameOver = true;
+        const finalPlayerScores = Object.entries(scores).filter(([key]) => key !== PLACEHOLDER_ID);
         const sortedScores = finalPlayerScores.sort((a,b) => b[1] - a[1]);
-        if (sortedScores.length > 0) {
-            gameWinner = sortedScores[0][0];
-            roundMessage += ` GAME OVER! Winner: ${gameWinner}.`;
-        } else {
-            gameWinner = "N/A";
-            roundMessage += ` GAME OVER! No winner could be determined.`;
-        }
-        table.state = "Game Over";
-    } else {
-        table.state = "Awaiting Next Round Trigger";
+        gameWinner = sortedScores.length > 0 ? sortedScores[0][0] : "N/A";
+        roundMessage += ` GAME OVER! Winner: ${gameWinner}.`;
     }
 
     table.roundSummary = {
-        bidWinnerName,
-        bidType,
-        trumpSuit: table.trumpSuit,
-        // --- BUG FIX START ---
-        // The error was here. The local variables are bidderTotalCardPoints and
-        // defendersTotalCardPoints, but shorthand was used for different names.
-        // This explicitly assigns the correct variables to the summary object properties.
+        bidWinnerName, bidType, trumpSuit: table.trumpSuit,
         bidderCardPoints: bidderTotalCardPoints,
         defenderCardPoints: defendersTotalCardPoints,
-        // --- BUG FIX END ---
-        awardedWidowInfo,
-        bidMadeSuccessfully,
-        scoresBeforeExchange,
-        finalScores: scores,
-        isGameOver,
-        gameWinner,
-        message: roundMessage,
+        widowForReveal: table.originalDealtWidow,
+        awardedWidowInfo, scoresBeforeExchange,
+        finalScores: { ...scores }, isGameOver, gameWinner, message: roundMessage,
         dealerOfRoundId: table.dealer,
         insuranceDealWasMade: insurance.dealExecuted,
         insuranceDetails: insurance.dealExecuted ? insurance.executedDetails : null,
+        insuranceHindsight: insuranceHindsight,
     };
+    
+    table.state = "WidowReveal";
     emitTableUpdate(tableId);
+
+    setTimeout(() => {
+        const currentTable = tables[tableId];
+        if (currentTable && currentTable.state === "WidowReveal") {
+            currentTable.state = isGameOver ? "Game Over" : "Awaiting Next Round Trigger";
+            emitTableUpdate(tableId);
+        }
+    }, 5000);
 }
 
 function prepareNextRound(tableId) {
     const table = tables[tableId];
     if (!table || !table.gameStarted) return;
     const lastDealerId = table.roundSummary?.dealerOfRoundId || table.dealer;
-    const allPlayerIds = Object.keys(table.players).filter(pId => !table.players[pId].isSpectator);
+    const allPlayerIds = Object.keys(table.players).filter(pId => !table.players[pId].isSpectator && !p.disconnected);
     if (allPlayerIds.length < 3) { return resetTable(tableId, true); }
     const lastDealerIndex = allPlayerIds.indexOf(lastDealerId);
     const nextDealerIndex = (lastDealerIndex !== -1 ? lastDealerIndex + 1 : 1) % allPlayerIds.length;
@@ -675,13 +722,11 @@ function prepareNextRound(tableId) {
     const currentDealerIndex = allPlayerIds.indexOf(table.dealer);
     if (table.playerMode === 4) {
         for (let i = 1; i <= 3; i++) {
-            const activePlayerId = allPlayerIds[(currentDealerIndex + i) % 4];
-            table.playerOrderActive.push(getPlayerNameByPlayerId(activePlayerId, table));
+            table.playerOrderActive.push(getPlayerNameByPlayerId(allPlayerIds[(currentDealerIndex + i) % 4], table));
         }
     } else {
         for (let i = 1; i <= 3; i++) {
-            const activePlayerId = allPlayerIds[(currentDealerIndex + i) % 3];
-            table.playerOrderActive.push(getPlayerNameByPlayerId(activePlayerId, table));
+             table.playerOrderActive.push(getPlayerNameByPlayerId(allPlayerIds[(currentDealerIndex + i) % 3], table));
         }
     }
     initializeNewRoundState(table);
