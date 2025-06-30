@@ -1,4 +1,4 @@
-// --- Backend/server.js (v4.7.2) ---
+// --- Backend/server.js (v4.9.0) ---
 require("dotenv").config();
 const http = require("http");
 const { Server } = require("socket.io");
@@ -10,7 +10,7 @@ const app = express();
 const server = http.createServer(app);
 
 // --- VERSION UPDATED ---
-const SERVER_VERSION = "4.7.2 - Fixed Round End Crash";
+const SERVER_VERSION = "4.9.0 - Widow Reveal State";
 console.log(`SLUFF SERVER (${SERVER_VERSION}): Initializing...`);
 
 const io = new Server(server, {
@@ -582,7 +582,6 @@ function determineTrickWinner(trickCards, leadSuit, trumpSuit) {
     return winningPlay ? winningPlay.playerName : null;
 }
 
-// --- BUG FIX APPLIED IN THIS FUNCTION ---
 function calculateRoundScores(tableId) {
     const table = tables[tableId];
     if (!table || !table.bidWinnerInfo) return;
@@ -625,33 +624,21 @@ function calculateRoundScores(tableId) {
     if(finalPlayerScores.some(([,score]) => score <= 0)) {
         isGameOver = true;
         const sortedScores = finalPlayerScores.sort((a,b) => b[1] - a[1]);
-        if (sortedScores.length > 0) {
-            gameWinner = sortedScores[0][0];
-            roundMessage += ` GAME OVER! Winner: ${gameWinner}.`;
-        } else {
-            gameWinner = "N/A";
-            roundMessage += ` GAME OVER! No winner could be determined.`;
-        }
-        table.state = "Game Over";
-    } else {
-        table.state = "Awaiting Next Round Trigger";
+        gameWinner = sortedScores.length > 0 ? sortedScores[0][0] : "N/A";
+        roundMessage += ` GAME OVER! Winner: ${gameWinner}.`;
     }
 
     table.roundSummary = {
         bidWinnerName,
         bidType,
         trumpSuit: table.trumpSuit,
-        // --- BUG FIX START ---
-        // The error was here. The local variables are bidderTotalCardPoints and
-        // defendersTotalCardPoints, but shorthand was used for different names.
-        // This explicitly assigns the correct variables to the summary object properties.
         bidderCardPoints: bidderTotalCardPoints,
         defenderCardPoints: defendersTotalCardPoints,
-        // --- BUG FIX END ---
+        widowForReveal: table.originalDealtWidow,
         awardedWidowInfo,
         bidMadeSuccessfully,
         scoresBeforeExchange,
-        finalScores: scores,
+        finalScores: { ...scores },
         isGameOver,
         gameWinner,
         message: roundMessage,
@@ -659,7 +646,17 @@ function calculateRoundScores(tableId) {
         insuranceDealWasMade: insurance.dealExecuted,
         insuranceDetails: insurance.dealExecuted ? insurance.executedDetails : null,
     };
+    
+    table.state = "WidowReveal";
     emitTableUpdate(tableId);
+
+    setTimeout(() => {
+        const currentTable = tables[tableId];
+        if (currentTable && currentTable.state === "WidowReveal") {
+            currentTable.state = isGameOver ? "Game Over" : "Awaiting Next Round Trigger";
+            emitTableUpdate(tableId);
+        }
+    }, 5000);
 }
 
 function prepareNextRound(tableId) {
