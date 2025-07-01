@@ -346,6 +346,18 @@ socket.on("takeSeat", ({ tableId, disconnectedPlayerId }) => {
     const table = tables[tableId];
     if (!table || table.state !== 'Awaiting Replacement' || !table.players[disconnectedPlayerId]?.disconnected) return;
 
+    // --- FIX: If the same player is reclaiming their own seat, just mark as reconnected ---
+    if (newPlayerId === disconnectedPlayerId) {
+        table.players[disconnectedPlayerId].disconnected = false;
+        table.players[disconnectedPlayerId].isSpectator = false;
+        table.players[disconnectedPlayerId].socketId = socket.id;
+        table.state = table.preDisconnectState || 'Playing Phase';
+        table.preDisconnectState = null;
+        emitTableUpdate(tableId);
+        emitLobbyUpdate();
+        return;
+    }
+
     // Ensure the player is in the table as a spectator before taking the seat
     if (!table.players[newPlayerId]) {
         table.players[newPlayerId] = {
