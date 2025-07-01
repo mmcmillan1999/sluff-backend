@@ -138,4 +138,5 @@ io.on("connection", (socket) => {
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, async () => {
   console.log(`Sluff Game Server (${SERVER_VERSION}) running on port ${PORT}`);
-  await createTables(); //
+  await createTables();
+});
