@@ -1,4 +1,4 @@
-// --- Backend/server.js (v4.9.7 - Seamless Reconnect) ---
+// --- Backend/server.js (v4.9.8 - Final Reconnect Fix) ---
 require("dotenv").config();
 const http = require("http");
 const { Server } = require("socket.io");
@@ -9,7 +9,7 @@ const { v4: uuidv4 } = require('uuid');
 const app = express();
 const server = http.createServer(app);
 
-const SERVER_VERSION = "4.9.7 - Seamless Reconnect";
+const SERVER_VERSION = "4.9.8 - Final Reconnect Fix";
 console.log(`SLUFF SERVER (${SERVER_VERSION}): Initializing...`);
 
 const io = new Server(server, {
@@ -237,22 +237,23 @@ io.on("connection", (socket) => {
             const player = players[playerId];
             player.socketId = socket.id;
             player.disconnected = false;
-
+    
             if (player.tableId && tables[player.tableId]?.players[playerId]) {
                 const table = tables[player.tableId];
                 table.players[playerId].disconnected = false;
                 table.players[playerId].socketId = socket.id;
                 socket.join(player.tableId);
-
-                // --- SEAMLESS RECONNECT LOGIC ---
+    
+                // --- SEAMLESS RECONNECT LOGIC (REVISED) ---
                 if (table.state === 'Awaiting Replacement' && table.playerAwaited === playerId) {
                     console.log(`[${table.tableId}] Automatically resuming seat for ${playerName}.`);
+                    table.players[playerId].isSpectator = false; // Set player as active
                     table.state = table.preDisconnectState;
                     table.preDisconnectState = null;
                     table.playerAwaited = null;
                 }
-                // --- END SEAMLESS RECONNECT LOGIC ---
-
+                // --- END REVISED LOGIC ---
+    
                 emitTableUpdate(player.tableId);
             } else {
                 player.tableId = null;
@@ -265,7 +266,6 @@ io.on("connection", (socket) => {
         }
         emitLobbyUpdate();
     });
-
 
     socket.on('changeName', ({ newName }) => {
         const playerId = sockets[socket.id];
@@ -360,9 +360,9 @@ io.on("connection", (socket) => {
 
         const table = tables[tableId];
         if (!table || table.state !== 'Awaiting Replacement' || !table.players[disconnectedPlayerId]?.disconnected) return;
-
-        // Reclaiming own seat is now handled by the reconnectPlayer event, 
-        // but this check remains as a fallback.
+        
+        // This case handles a spectator taking over an abandoned seat.
+        // Reclaiming one's own seat is now handled automatically by the reconnectPlayer event.
         if (newPlayerId === disconnectedPlayerId) {
             table.players[disconnectedPlayerId].disconnected = false;
             table.players[disconnectedPlayerId].isSpectator = false;
@@ -375,7 +375,6 @@ io.on("connection", (socket) => {
             return;
         }
 
-        // Ensure the player is in the table as a spectator before taking the seat
         if (!table.players[newPlayerId]) {
             table.players[newPlayerId] = {
                 playerName: players[newPlayerId].playerName,
@@ -427,7 +426,7 @@ io.on("connection", (socket) => {
 
         table.state = table.preDisconnectState || 'Playing Phase';
         table.preDisconnectState = null;
-        table.playerAwaited = null; // Clear the awaited player flag
+        table.playerAwaited = null;
 
         emitTableUpdate(tableId);
         emitLobbyUpdate();
@@ -682,7 +681,7 @@ io.on("connection", (socket) => {
                 if (table.gameStarted && wasActivePlayer && table.state !== "Game Over" && table.state !== "Awaiting Replacement") {
                     table.preDisconnectState = table.state;
                     table.state = 'Awaiting Replacement';
-                    table.playerAwaited = playerId; // Track who disconnected
+                    table.playerAwaited = playerId;
                     emitTableUpdate(player.tableId);
 
                     setTimeout(() => {
@@ -696,10 +695,9 @@ io.on("connection", (socket) => {
                                 console.log(`[${player.tableId}] Not enough players, resetting table.`);
                                 resetTable(player.tableId, true);
                             } else {
-                                // If another player disconnected in the meantime, state should remain 'Awaiting Replacement'
                                 const stillAwaiting = Object.values(t.players).some(p => p.disconnected && !p.isSpectator);
                                 if (!stillAwaiting) {
-                                     t.state = t.preDisconnectState || 'Playing Phase'; // Fallback
+                                     t.state = t.preDisconnectState || 'Playing Phase';
                                      t.preDisconnectState = null;
                                      t.playerAwaited = null;
                                 }
