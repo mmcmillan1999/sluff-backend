@@ -657,31 +657,48 @@ socket.on("takeSeat", ({ tableId, disconnectedPlayerId }) => {
         emitTableUpdate(tableId);
     });
 
-    socket.on("disconnect", (reason) => {
-        const playerId = sockets[socket.id];
-        if (playerId && players[playerId]) {
-            const player = players[playerId];
-            player.disconnected = true;
-            if (player.tableId && tables[player.tableId]?.players[playerId]) {
-                const table = tables[player.tableId];
-                const wasActivePlayer = !table.players[playerId].isSpectator;
-                table.players[playerId].disconnected = true;
-                
-                if(table.gameStarted && wasActivePlayer && table.state !== "Game Over" && table.state !== "Awaiting Replacement") {
-                    table.preDisconnectState = table.state;
-                    table.state = 'Awaiting Replacement';
-                    emitTableUpdate(player.tableId);
-                } else if (!table.gameStarted) {
-                    delete table.players[playerId];
-                    const activePlayerCount = Object.values(table.players).filter(p=>!p.isSpectator).length;
-                    if(activePlayerCount < 3) table.state = "Waiting for Players";
-                    emitTableUpdate(player.tableId);
-                }
+socket.on("disconnect", (reason) => {
+    const playerId = sockets[socket.id];
+    if (playerId && players[playerId]) {
+        const player = players[playerId];
+        player.disconnected = true;
+        if (player.tableId && tables[player.tableId]?.players[playerId]) {
+            const table = tables[player.tableId];
+            const wasActivePlayer = !table.players[playerId].isSpectator;
+            table.players[playerId].disconnected = true;
+
+            if(table.gameStarted && wasActivePlayer && table.state !== "Game Over" && table.state !== "Awaiting Replacement") {
+                table.preDisconnectState = table.state;
+                table.state = 'Awaiting Replacement';
+                emitTableUpdate(player.tableId);
+
+                // --- Remove disconnected player after 30 seconds if not reclaimed ---
+                setTimeout(() => {
+                    const t = tables[player.tableId];
+                    if (t && t.players[playerId] && t.players[playerId].disconnected) {
+                        delete t.players[playerId];
+                        const activePlayerCount = Object.values(t.players).filter(p=>!p.isSpectator && !p.disconnected).length;
+                        const disconnectedCount = Object.values(t.players).filter(p=>!p.isSpectator && p.disconnected).length;
+                        if (activePlayerCount < 3 && disconnectedCount === 0) {
+                            t.state = "Waiting for Players";
+                            t.preDisconnectState = null;
+                        }
+                        emitTableUpdate(player.tableId);
+                        emitLobbyUpdate();
+                    }
+                }, 30 * 1000); // 30 seconds
+                // ------------------------------------------------------
+            } else if (!table.gameStarted) {
+                delete table.players[playerId];
+                const activePlayerCount = Object.values(table.players).filter(p=>!p.isSpectator).length;
+                if(activePlayerCount < 3) table.state = "Waiting for Players";
+                emitTableUpdate(player.tableId);
             }
-            emitLobbyUpdate();
-            delete sockets[socket.id];
         }
-    });
+        emitLobbyUpdate();
+        delete sockets[socket.id];
+    }
+});
 });
 
 function determineTrickWinner(trickCards, leadSuit, trumpSuit) {
