@@ -1,4 +1,4 @@
-// --- Backend/server.js (v4.9.3) ---
+// --- Backend/server.js (v4.9.4) ---
 require("dotenv").config();
 const http = require("http");
 const { Server } = require("socket.io");
@@ -9,7 +9,7 @@ const { v4: uuidv4 } = require('uuid');
 const app = express();
 const server = http.createServer(app);
 
-const SERVER_VERSION = "4.9.3 - Fixed All-Pass Disconnect Bug";
+const SERVER_VERSION = "4.9.4 - Resilient Disconnects";
 console.log(`SLUFF SERVER (${SERVER_VERSION}): Initializing...`);
 
 const io = new Server(server, {
@@ -57,6 +57,7 @@ function getInitialGameData(tableId) {
     return {
         tableId: tableId,
         state: "Waiting for Players",
+        preDisconnectState: null, // For storing state before a player leaves
         players: {},
         playerOrderActive: [],
         dealer: null,
@@ -100,7 +101,7 @@ function initializeServer() {
 initializeServer();
 
 // --- Utility Functions ---
-function getLobbyState() { return Object.fromEntries(Object.entries(tables).map(([tableId, table]) => { const activePlayers = Object.values(table.players).filter(p => !p.isSpectator); return [tableId, { tableId: table.tableId, state: table.state, players: activePlayers.map(p => ({playerName: p.playerName, disconnected: p.disconnected})), playerCount: activePlayers.length, spectatorCount: Object.values(table.players).length - activePlayers.length }]; })); }
+function getLobbyState() { return Object.fromEntries(Object.entries(tables).map(([tableId, table]) => { const allPlayers = Object.values(table.players); const activePlayers = allPlayers.filter(p => !p.isSpectator); return [tableId, { tableId: table.tableId, state: table.state, players: activePlayers.map(p => ({playerName: p.playerName, disconnected: p.disconnected})), playerCount: activePlayers.length, spectatorCount: allPlayers.length - activePlayers.length }]; })); }
 function emitLobbyUpdate() { io.emit("lobbyState", getLobbyState()); }
 function emitTableUpdate(tableId) { if (tables[tableId]) io.to(tableId).emit("gameState", tables[tableId]); }
 function getPlayerNameByPlayerId(playerId, table) { return table?.players[playerId]?.playerName || playerId; }
@@ -166,26 +167,20 @@ function transitionToPlayingPhase(table) {
 
 function resolveBiddingFinal(table) {
     if (!table.currentHighestBidDetails) {
-        // --- ALL PASS SCENARIO ---
         table.state = "AllPassWidowReveal";
         emitTableUpdate(table.tableId);
         
-        // After a delay, set up the next deal without calling the complex prepareNextRound function
         setTimeout(() => {
             const currentTable = tables[table.tableId];
             if(currentTable && currentTable.state === "AllPassWidowReveal"){
                 const allPlayerIds = Object.keys(currentTable.players).filter(pId => !currentTable.players[pId].isSpectator && !currentTable.players[pId].disconnected);
-                if (allPlayerIds.length < 3) {
-                    return resetTable(currentTable.tableId, true);
-                }
+                if (allPlayerIds.length < 3) return resetTable(currentTable.tableId, true);
                 
-                // 1. Advance the dealer
                 const lastDealerId = currentTable.dealer;
                 const lastDealerIndex = allPlayerIds.indexOf(lastDealerId);
                 const nextDealerIndex = (lastDealerIndex + 1) % allPlayerIds.length;
                 currentTable.dealer = allPlayerIds[nextDealerIndex];
                 
-                // 2. Re-populate playerOrderActive based on the new dealer
                 currentTable.playerOrderActive = [];
                 const currentDealerIndex = allPlayerIds.indexOf(currentTable.dealer);
                  if (currentTable.playerMode === 4) {
@@ -198,16 +193,12 @@ function resolveBiddingFinal(table) {
                     }
                 }
 
-                // 3. Reset round-specific state
                 initializeNewRoundState(currentTable);
-                
-                // 4. Set state to Dealing Pending and emit
                 currentTable.state = "Dealing Pending";
                 emitTableUpdate(currentTable.tableId);
             }
         }, 5000);
     } else {
-        // --- REGULAR BID SCENARIO ---
         table.bidWinnerInfo = { ...table.currentHighestBidDetails };
         const bid = table.bidWinnerInfo.bid;
         if (bid === "Frog") { table.trumpSuit = "H"; table.state = "FrogBidderConfirmWidow"; } 
@@ -298,12 +289,15 @@ io.on("connection", (socket) => {
                 emitTableUpdate(player.tableId);
             }
         }
+        
         const activePlayers = Object.values(table.players).filter(p => !p.isSpectator && !p.disconnected);
-        const canTakeSeat = activePlayers.length < MAX_PLAYERS_PER_TABLE && !table.gameStarted;
+        const canTakeSeat = activePlayers.length < MAX_PLAYERS_PER_TABLE && !table.gameStarted && table.state !== 'Awaiting Replacement';
         const joinAsSpectator = !canTakeSeat;
+        
         player.tableId = tableId;
         table.players[playerId] = { playerName: player.playerName, socketId: socket.id, isSpectator: joinAsSpectator, disconnected: false };
         socket.join(tableId);
+
         if (!joinAsSpectator) {
              if (table.scores[player.playerName] === undefined) table.scores[player.playerName] = 120;
              const numActivePlayers = Object.values(table.players).filter(p => !p.isSpectator && !p.disconnected).length;
@@ -322,20 +316,80 @@ io.on("connection", (socket) => {
         const player = players[playerId];
         const table = tables[tableId];
         if(!table || !table.players[playerId]) return;
+        
         const wasActivePlayer = !table.players[playerId].isSpectator;
         delete table.players[playerId];
         player.tableId = null;
         socket.leave(tableId);
-        if(wasActivePlayer && table.gameStarted){ resetTable(tableId, true);
+
+        if(wasActivePlayer && table.gameStarted && table.state !== 'Awaiting Replacement'){ 
+            table.preDisconnectState = table.state;
+            table.state = 'Awaiting Replacement';
+            table.players[playerId] = { ...players[playerId], disconnected: true, isSpectator: false }; // Re-add as disconnected
         } else {
             const activePlayerCount = Object.values(table.players).filter(p=>!p.isSpectator && !p.disconnected).length;
-            if(activePlayerCount < 3) {
-                table.state = "Waiting for Players";
+            if(activePlayerCount < 3 && table.gameStarted) {
+                resetTable(tableId, true);
+            } else if (activePlayerCount < 3) {
+                 table.state = "Waiting for Players";
             }
-            emitTableUpdate(tableId);
         }
+        emitTableUpdate(tableId);
         emitLobbyUpdate();
         socket.emit("lobbyState", getLobbyState());
+    });
+
+    socket.on("takeSeat", ({ tableId, disconnectedPlayerId }) => {
+        const newPlayerId = sockets[socket.id];
+        if (!newPlayerId || !players[newPlayerId]) return;
+
+        const table = tables[tableId];
+        if (!table || table.state !== 'Awaiting Replacement' || !table.players[disconnectedPlayerId]?.disconnected) return;
+
+        const newPlayerData = players[newPlayerId];
+        const oldPlayerData = table.players[disconnectedPlayerId];
+        const oldPlayerName = oldPlayerData.playerName;
+        const newPlayerName = newPlayerData.playerName;
+
+        // Transfer properties to the old player slot
+        table.players[disconnectedPlayerId] = {
+            ...oldPlayerData,
+            playerName: newPlayerName,
+            socketId: newPlayerData.socketId,
+            disconnected: false,
+        };
+
+        // Update name references throughout the game state
+        if (table.scores[oldPlayerName] !== undefined) {
+            table.scores[newPlayerName] = table.scores[oldPlayerName];
+            delete table.scores[oldPlayerName];
+        }
+        if (table.hands[oldPlayerName]) {
+            table.hands[newPlayerName] = table.hands[oldPlayerName];
+            delete table.hands[oldPlayerName];
+        }
+        if (table.capturedTricks[oldPlayerName]) {
+            table.capturedTricks[newPlayerName] = table.capturedTricks[oldPlayerName];
+            delete table.capturedTricks[oldPlayerName];
+        }
+        const orderIndex = table.playerOrderActive.indexOf(oldPlayerName);
+        if (orderIndex > -1) {
+            table.playerOrderActive[orderIndex] = newPlayerName;
+        }
+        if (table.biddingTurnPlayerName === oldPlayerName) table.biddingTurnPlayerName = newPlayerName;
+        if (table.trickTurnPlayerName === oldPlayerName) table.trickTurnPlayerName = newPlayerName;
+        if (table.trickLeaderName === oldPlayerName) table.trickLeaderName = newPlayerName;
+        if (table.bidWinnerInfo?.playerName === oldPlayerName) table.bidWinnerInfo.playerName = newPlayerName;
+        
+        // Remove the new player's old spectator entry
+        delete table.players[newPlayerId];
+
+        // Resume the game
+        table.state = table.preDisconnectState || 'Playing Phase';
+        table.preDisconnectState = null;
+
+        emitTableUpdate(tableId);
+        emitLobbyUpdate();
     });
     
     socket.on("startGame", ({ tableId }) => {
@@ -581,16 +635,18 @@ io.on("connection", (socket) => {
             player.disconnected = true;
             if (player.tableId && tables[player.tableId]?.players[playerId]) {
                 const table = tables[player.tableId];
+                const wasActivePlayer = !table.players[playerId].isSpectator;
                 table.players[playerId].disconnected = true;
-                if (table.insurance.isActive && !table.insurance.dealExecuted) {
-                    const pName = player.playerName;
-                    if (table.insurance.bidderPlayerName === pName) { table.insurance.isActive = false; } 
-                    else if (table.insurance.defenderOffers.hasOwnProperty(pName)) { delete table.insurance.defenderOffers[pName]; }
-                }
-                if(table.gameStarted && table.state !== "Waiting for Players" && table.state !== "Ready to Start" && table.state !== "Game Over"){
-                    resetTable(player.tableId, true);
-                } else {
-                   emitTableUpdate(player.tableId);
+                
+                if(table.gameStarted && wasActivePlayer && table.state !== "Game Over" && table.state !== "Awaiting Replacement") {
+                    table.preDisconnectState = table.state;
+                    table.state = 'Awaiting Replacement';
+                    emitTableUpdate(player.tableId);
+                } else if (!table.gameStarted) {
+                    delete table.players[playerId];
+                    const activePlayerCount = Object.values(table.players).filter(p=>!p.isSpectator).length;
+                    if(activePlayerCount < 3) table.state = "Waiting for Players";
+                    emitTableUpdate(player.tableId);
                 }
             }
             emitLobbyUpdate();
