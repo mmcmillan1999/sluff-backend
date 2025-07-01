@@ -1,4 +1,4 @@
-// --- Backend/server.js (v4.9.8 - Final Reconnect Fix) ---
+// --- Backend/server.js (v4.9.9 - Force Reclaim Seat) ---
 require("dotenv").config();
 const http = require("http");
 const { Server } = require("socket.io");
@@ -9,7 +9,7 @@ const { v4: uuidv4 } = require('uuid');
 const app = express();
 const server = http.createServer(app);
 
-const SERVER_VERSION = "4.9.8 - Final Reconnect Fix";
+const SERVER_VERSION = "4.9.9 - Force Reclaim Seat";
 console.log(`SLUFF SERVER (${SERVER_VERSION}): Initializing...`);
 
 const io = new Server(server, {
@@ -244,15 +244,13 @@ io.on("connection", (socket) => {
                 table.players[playerId].socketId = socket.id;
                 socket.join(player.tableId);
     
-                // --- SEAMLESS RECONNECT LOGIC (REVISED) ---
                 if (table.state === 'Awaiting Replacement' && table.playerAwaited === playerId) {
                     console.log(`[${table.tableId}] Automatically resuming seat for ${playerName}.`);
-                    table.players[playerId].isSpectator = false; // Set player as active
+                    table.players[playerId].isSpectator = false;
                     table.state = table.preDisconnectState;
                     table.preDisconnectState = null;
                     table.playerAwaited = null;
                 }
-                // --- END REVISED LOGIC ---
     
                 emitTableUpdate(player.tableId);
             } else {
@@ -361,8 +359,6 @@ io.on("connection", (socket) => {
         const table = tables[tableId];
         if (!table || table.state !== 'Awaiting Replacement' || !table.players[disconnectedPlayerId]?.disconnected) return;
         
-        // This case handles a spectator taking over an abandoned seat.
-        // Reclaiming one's own seat is now handled automatically by the reconnectPlayer event.
         if (newPlayerId === disconnectedPlayerId) {
             table.players[disconnectedPlayerId].disconnected = false;
             table.players[disconnectedPlayerId].isSpectator = false;
@@ -430,6 +426,27 @@ io.on("connection", (socket) => {
 
         emitTableUpdate(tableId);
         emitLobbyUpdate();
+    });
+
+    socket.on("forceReclaimSeat", ({ tableId }) => {
+        const playerId = sockets[socket.id];
+        const table = tables[tableId];
+    
+        if (!table || !playerId || !players[playerId]) return;
+    
+        if (table.state === 'Awaiting Replacement' && table.playerAwaited === playerId) {
+            console.log(`[${tableId}] Forcefully resuming seat for ${players[playerId].playerName}.`);
+    
+            if (table.players[playerId]) {
+                table.players[playerId].isSpectator = false;
+                table.players[playerId].disconnected = false;
+            }
+            table.state = table.preDisconnectState;
+            table.preDisconnectState = null;
+            table.playerAwaited = null;
+    
+            emitTableUpdate(tableId);
+        }
     });
     
     socket.on("startGame", ({ tableId }) => {
