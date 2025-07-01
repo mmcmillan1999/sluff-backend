@@ -1,4 +1,4 @@
-// --- Backend/server.js (v4.9.6) ---
+// --- Backend/server.js (v4.9.7 - Seamless Reconnect) ---
 require("dotenv").config();
 const http = require("http");
 const { Server } = require("socket.io");
@@ -9,7 +9,7 @@ const { v4: uuidv4 } = require('uuid');
 const app = express();
 const server = http.createServer(app);
 
-const SERVER_VERSION = "4.9.6 - Fixed Hindsight & Post-Disconnect Dealer";
+const SERVER_VERSION = "4.9.7 - Seamless Reconnect";
 console.log(`SLUFF SERVER (${SERVER_VERSION}): Initializing...`);
 
 const io = new Server(server, {
@@ -57,7 +57,8 @@ function getInitialGameData(tableId) {
     return {
         tableId: tableId,
         state: "Waiting for Players",
-        preDisconnectState: null, 
+        preDisconnectState: null,
+        playerAwaited: null, // To track player for seamless reconnect
         players: {},
         playerOrderActive: [],
         dealer: null,
@@ -138,6 +139,7 @@ function initializeNewRoundState(table) {
         trickTurnPlayerName: null, tricksPlayedCount: 0, leadSuitCurrentTrick: null, trumpBroken: false,
         trickLeaderName: null, capturedTricks: {}, roundSummary: null, revealedWidowForFrog: [],
         lastCompletedTrick: null, playersWhoPassedThisRound: [], insurance: getInitialInsuranceState(),
+        playerAwaited: null, preDisconnectState: null,
     });
     table.playerOrderActive.forEach(pName => { if (pName && table.scores[pName] !== undefined) table.capturedTricks[pName] = []; });
 }
@@ -235,11 +237,22 @@ io.on("connection", (socket) => {
             const player = players[playerId];
             player.socketId = socket.id;
             player.disconnected = false;
+
             if (player.tableId && tables[player.tableId]?.players[playerId]) {
                 const table = tables[player.tableId];
                 table.players[playerId].disconnected = false;
                 table.players[playerId].socketId = socket.id;
                 socket.join(player.tableId);
+
+                // --- SEAMLESS RECONNECT LOGIC ---
+                if (table.state === 'Awaiting Replacement' && table.playerAwaited === playerId) {
+                    console.log(`[${table.tableId}] Automatically resuming seat for ${playerName}.`);
+                    table.state = table.preDisconnectState;
+                    table.preDisconnectState = null;
+                    table.playerAwaited = null;
+                }
+                // --- END SEAMLESS RECONNECT LOGIC ---
+
                 emitTableUpdate(player.tableId);
             } else {
                 player.tableId = null;
@@ -252,6 +265,7 @@ io.on("connection", (socket) => {
         }
         emitLobbyUpdate();
     });
+
 
     socket.on('changeName', ({ newName }) => {
         const playerId = sockets[socket.id];
@@ -325,6 +339,7 @@ io.on("connection", (socket) => {
         if(wasActivePlayer && table.gameStarted && table.state !== 'Awaiting Replacement'){ 
             table.preDisconnectState = table.state;
             table.state = 'Awaiting Replacement';
+            table.playerAwaited = playerId;
             table.players[playerId] = { ...players[playerId], disconnected: true, isSpectator: false }; 
         } else {
             const activePlayerCount = Object.values(table.players).filter(p=>!p.isSpectator && !p.disconnected).length;
@@ -339,87 +354,84 @@ io.on("connection", (socket) => {
         socket.emit("lobbyState", getLobbyState());
     });
 
-socket.on("takeSeat", ({ tableId, disconnectedPlayerId }) => {
-    const newPlayerId = sockets[socket.id];
-    if (!newPlayerId || !players[newPlayerId]) return;
+    socket.on("takeSeat", ({ tableId, disconnectedPlayerId }) => {
+        const newPlayerId = sockets[socket.id];
+        if (!newPlayerId || !players[newPlayerId]) return;
 
-    const table = tables[tableId];
-    if (!table || table.state !== 'Awaiting Replacement' || !table.players[disconnectedPlayerId]?.disconnected) return;
+        const table = tables[tableId];
+        if (!table || table.state !== 'Awaiting Replacement' || !table.players[disconnectedPlayerId]?.disconnected) return;
 
-    // --- FIX: If the same player is reclaiming their own seat, just mark as reconnected ---
-    if (newPlayerId === disconnectedPlayerId) {
-        table.players[disconnectedPlayerId].disconnected = false;
-        table.players[disconnectedPlayerId].isSpectator = false;
-        table.players[disconnectedPlayerId].socketId = socket.id;
+        // Reclaiming own seat is now handled by the reconnectPlayer event, 
+        // but this check remains as a fallback.
+        if (newPlayerId === disconnectedPlayerId) {
+            table.players[disconnectedPlayerId].disconnected = false;
+            table.players[disconnectedPlayerId].isSpectator = false;
+            table.players[disconnectedPlayerId].socketId = socket.id;
+            table.state = table.preDisconnectState || 'Playing Phase';
+            table.preDisconnectState = null;
+            table.playerAwaited = null;
+            emitTableUpdate(tableId);
+            emitLobbyUpdate();
+            return;
+        }
+
+        // Ensure the player is in the table as a spectator before taking the seat
+        if (!table.players[newPlayerId]) {
+            table.players[newPlayerId] = {
+                playerName: players[newPlayerId].playerName,
+                socketId: socket.id,
+                isSpectator: true,
+                disconnected: false
+            };
+            socket.join(tableId);
+        }
+
+        const newPlayerTableInfo = table.players[newPlayerId];
+        const oldPlayerInfo = table.players[disconnectedPlayerId];
+        if (!newPlayerTableInfo || !oldPlayerInfo) return;
+
+        const oldPlayerName = oldPlayerInfo.playerName;
+        const newPlayerName = newPlayerTableInfo.playerName;
+
+        newPlayerTableInfo.isSpectator = false;
+        newPlayerTableInfo.disconnected = false;
+
+        table.hands[newPlayerName] = table.hands[oldPlayerName];
+        delete table.hands[oldPlayerName];
+
+        table.scores[newPlayerName] = table.scores[oldPlayerName];
+        delete table.scores[oldPlayerName];
+
+        if (table.capturedTricks[oldPlayerName]) {
+            table.capturedTricks[newPlayerName] = table.capturedTricks[oldPlayerName];
+            delete table.capturedTricks[oldPlayerName];
+        }
+
+        const orderIndex = table.playerOrderActive.indexOf(oldPlayerName);
+        if (orderIndex > -1) table.playerOrderActive[orderIndex] = newPlayerName;
+        
+        if (table.dealer === disconnectedPlayerId) table.dealer = newPlayerId;
+        if (table.roundSummary?.dealerOfRoundId === disconnectedPlayerId) table.roundSummary.dealerOfRoundId = newPlayerId;
+
+        if (table.biddingTurnPlayerName === oldPlayerName) table.biddingTurnPlayerName = newPlayerName;
+        if (table.trickTurnPlayerName === oldPlayerName) table.trickTurnPlayerName = newPlayerName;
+        if (table.trickLeaderName === oldPlayerName) table.trickLeaderName = newPlayerName;
+        if (table.bidWinnerInfo?.playerName === oldPlayerName) table.bidWinnerInfo.playerName = newPlayerName;
+        if (table.insurance.bidderPlayerName === oldPlayerName) table.insurance.bidderPlayerName = newPlayerName;
+        if (table.insurance.defenderOffers[oldPlayerName]) {
+            table.insurance.defenderOffers[newPlayerName] = table.insurance.defenderOffers[oldPlayerName];
+            delete table.insurance.defenderOffers[oldPlayerName];
+        }
+        
+        delete table.players[disconnectedPlayerId];
+
         table.state = table.preDisconnectState || 'Playing Phase';
         table.preDisconnectState = null;
+        table.playerAwaited = null; // Clear the awaited player flag
+
         emitTableUpdate(tableId);
         emitLobbyUpdate();
-        return;
-    }
-
-    // Ensure the player is in the table as a spectator before taking the seat
-    if (!table.players[newPlayerId]) {
-        table.players[newPlayerId] = {
-            playerName: players[newPlayerId].playerName,
-            socketId: socket.id,
-            isSpectator: true,
-            disconnected: false
-        };
-        socket.join(tableId);
-    }
-
-    const newPlayerTableInfo = table.players[newPlayerId];
-    const oldPlayerInfo = table.players[disconnectedPlayerId];
-
-    if (!newPlayerTableInfo || !oldPlayerInfo) return;
-
-    const oldPlayerName = oldPlayerInfo.playerName;
-    const newPlayerName = newPlayerTableInfo.playerName;
-
-    newPlayerTableInfo.isSpectator = false;
-    newPlayerTableInfo.disconnected = false;
-
-    table.hands[newPlayerName] = table.hands[oldPlayerName];
-    delete table.hands[oldPlayerName];
-
-    table.scores[newPlayerName] = table.scores[oldPlayerName];
-    delete table.scores[oldPlayerName];
-
-    if (table.capturedTricks[oldPlayerName]) {
-        table.capturedTricks[newPlayerName] = table.capturedTricks[oldPlayerName];
-        delete table.capturedTricks[oldPlayerName];
-    }
-
-    const orderIndex = table.playerOrderActive.indexOf(oldPlayerName);
-    if (orderIndex > -1) {
-        table.playerOrderActive[orderIndex] = newPlayerName;
-    }
-    if (table.dealer === disconnectedPlayerId) {
-        table.dealer = newPlayerId;
-    }
-    if (table.roundSummary?.dealerOfRoundId === disconnectedPlayerId) {
-        table.roundSummary.dealerOfRoundId = newPlayerId;
-    }
-
-    if (table.biddingTurnPlayerName === oldPlayerName) table.biddingTurnPlayerName = newPlayerName;
-    if (table.trickTurnPlayerName === oldPlayerName) table.trickTurnPlayerName = newPlayerName;
-    if (table.trickLeaderName === oldPlayerName) table.trickLeaderName = newPlayerName;
-    if (table.bidWinnerInfo?.playerName === oldPlayerName) table.bidWinnerInfo.playerName = newPlayerName;
-    if (table.insurance.bidderPlayerName === oldPlayerName) table.insurance.bidderPlayerName = newPlayerName;
-    if (table.insurance.defenderOffers[oldPlayerName]) {
-        table.insurance.defenderOffers[newPlayerName] = table.insurance.defenderOffers[oldPlayerName];
-        delete table.insurance.defenderOffers[oldPlayerName];
-    }
-    
-    delete table.players[disconnectedPlayerId];
-
-    table.state = table.preDisconnectState || 'Playing Phase';
-    table.preDisconnectState = null;
-
-    emitTableUpdate(tableId);
-    emitLobbyUpdate();
-});
+    });
     
     socket.on("startGame", ({ tableId }) => {
         const table = tables[tableId];
@@ -657,48 +669,56 @@ socket.on("takeSeat", ({ tableId, disconnectedPlayerId }) => {
         emitTableUpdate(tableId);
     });
 
-socket.on("disconnect", (reason) => {
-    const playerId = sockets[socket.id];
-    if (playerId && players[playerId]) {
-        const player = players[playerId];
-        player.disconnected = true;
-        if (player.tableId && tables[player.tableId]?.players[playerId]) {
-            const table = tables[player.tableId];
-            const wasActivePlayer = !table.players[playerId].isSpectator;
-            table.players[playerId].disconnected = true;
+    socket.on("disconnect", (reason) => {
+        const playerId = sockets[socket.id];
+        if (playerId && players[playerId]) {
+            const player = players[playerId];
+            player.disconnected = true;
+            if (player.tableId && tables[player.tableId]?.players[playerId]) {
+                const table = tables[player.tableId];
+                const wasActivePlayer = !table.players[playerId].isSpectator;
+                table.players[playerId].disconnected = true;
 
-            if(table.gameStarted && wasActivePlayer && table.state !== "Game Over" && table.state !== "Awaiting Replacement") {
-                table.preDisconnectState = table.state;
-                table.state = 'Awaiting Replacement';
-                emitTableUpdate(player.tableId);
+                if (table.gameStarted && wasActivePlayer && table.state !== "Game Over" && table.state !== "Awaiting Replacement") {
+                    table.preDisconnectState = table.state;
+                    table.state = 'Awaiting Replacement';
+                    table.playerAwaited = playerId; // Track who disconnected
+                    emitTableUpdate(player.tableId);
 
-                // --- Remove disconnected player after 30 seconds if not reclaimed ---
-                setTimeout(() => {
-                    const t = tables[player.tableId];
-                    if (t && t.players[playerId] && t.players[playerId].disconnected) {
-                        delete t.players[playerId];
-                        const activePlayerCount = Object.values(t.players).filter(p=>!p.isSpectator && !p.disconnected).length;
-                        const disconnectedCount = Object.values(t.players).filter(p=>!p.isSpectator && p.disconnected).length;
-                        if (activePlayerCount < 3 && disconnectedCount === 0) {
-                            t.state = "Waiting for Players";
-                            t.preDisconnectState = null;
+                    setTimeout(() => {
+                        const t = tables[player.tableId];
+                        if (t && t.players[playerId] && t.players[playerId].disconnected && t.playerAwaited === playerId) {
+                            console.log(`[${player.tableId}] Player ${player.playerName} did not reclaim seat in time. Removing.`);
+                            delete t.players[playerId];
+                            const activePlayerCount = Object.values(t.players).filter(p=>!p.isSpectator && !p.disconnected).length;
+                            
+                            if (activePlayerCount < 3) {
+                                console.log(`[${player.tableId}] Not enough players, resetting table.`);
+                                resetTable(player.tableId, true);
+                            } else {
+                                // If another player disconnected in the meantime, state should remain 'Awaiting Replacement'
+                                const stillAwaiting = Object.values(t.players).some(p => p.disconnected && !p.isSpectator);
+                                if (!stillAwaiting) {
+                                     t.state = t.preDisconnectState || 'Playing Phase'; // Fallback
+                                     t.preDisconnectState = null;
+                                     t.playerAwaited = null;
+                                }
+                            }
+                            emitTableUpdate(player.tableId);
+                            emitLobbyUpdate();
                         }
-                        emitTableUpdate(player.tableId);
-                        emitLobbyUpdate();
-                    }
-                }, 30 * 1000); // 30 seconds
-                // ------------------------------------------------------
-            } else if (!table.gameStarted) {
-                delete table.players[playerId];
-                const activePlayerCount = Object.values(table.players).filter(p=>!p.isSpectator).length;
-                if(activePlayerCount < 3) table.state = "Waiting for Players";
-                emitTableUpdate(player.tableId);
+                    }, 30 * 1000);
+                } else if (!table.gameStarted) {
+                    delete table.players[playerId];
+                    const activePlayerCount = Object.values(table.players).filter(p => !p.isSpectator).length;
+                    if (activePlayerCount < 3) table.state = "Waiting for Players";
+                    emitTableUpdate(player.tableId);
+                }
             }
+            emitLobbyUpdate();
+            delete sockets[socket.id];
         }
-        emitLobbyUpdate();
-        delete sockets[socket.id];
-    }
-});
+    });
 });
 
 function determineTrickWinner(trickCards, leadSuit, trumpSuit) {
@@ -742,7 +762,6 @@ function calculateRoundScores(tableId) {
     const scoresBeforeExchange = JSON.parse(JSON.stringify(scores));
     let roundMessage = "";
     let insuranceHindsight = null;
-    let actualScoreChanges = {};
 
     if (playerMode === 3) {
         insuranceHindsight = {};
@@ -761,18 +780,19 @@ function calculateRoundScores(tableId) {
             }
         }
 
-        const insuranceChanges = {};
-        const agreement = insurance.dealExecuted ? insurance.executedDetails.agreement : { bidderRequirement: insurance.bidderRequirement, defenderOffers: insurance.defenderOffers };
-        insuranceChanges[bidWinnerName] = agreement.bidderRequirement;
-        for (const defenderName in agreement.defenderOffers) {
-             insuranceChanges[defenderName] = -agreement.defenderOffers[defenderName];
+        const insuranceAgreement = insurance.dealExecuted ? insurance.executedDetails.agreement : null;
+        const potentialInsuranceChanges = {};
+        const bidderReq = insurance.dealExecuted ? insuranceAgreement.bidderRequirement : insurance.bidderRequirement;
+        const defenderOff = insurance.dealExecuted ? insuranceAgreement.defenderOffers : insurance.defenderOffers;
+        potentialInsuranceChanges[bidWinnerName] = bidderReq;
+        for (const defenderName in defenderOff) {
+            potentialInsuranceChanges[defenderName] = -defenderOff[defenderName];
         }
 
         playerOrderActive.forEach(pName => {
-            insuranceHindsight[pName] = {
-                actual: insurance.dealExecuted ? (insuranceChanges[pName] || 0) : (playedOutChanges[pName] || 0),
-                potential: insurance.dealExecuted ? (playedOutChanges[pName] || 0) : (insuranceChanges[pName] || 0)
-            };
+            const actualChange = insurance.dealExecuted ? (potentialInsuranceChanges[pName] || 0) : (playedOutChanges[pName] || 0);
+            const potentialChange = insurance.dealExecuted ? (playedOutChanges[pName] || 0) : (potentialInsuranceChanges[pName] || 0);
+            insuranceHindsight[pName] = actualChange - potentialChange;
         });
     }
 
