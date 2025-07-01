@@ -339,65 +339,75 @@ io.on("connection", (socket) => {
         socket.emit("lobbyState", getLobbyState());
     });
 
-    socket.on("takeSeat", ({ tableId, disconnectedPlayerId }) => {
-        const newPlayerId = sockets[socket.id];
-        if (!newPlayerId || !players[newPlayerId]) return;
+socket.on("takeSeat", ({ tableId, disconnectedPlayerId }) => {
+    const newPlayerId = sockets[socket.id];
+    if (!newPlayerId || !players[newPlayerId]) return;
 
-        const table = tables[tableId];
-        if (!table || table.state !== 'Awaiting Replacement' || !table.players[disconnectedPlayerId]?.disconnected) return;
+    const table = tables[tableId];
+    if (!table || table.state !== 'Awaiting Replacement' || !table.players[disconnectedPlayerId]?.disconnected) return;
 
-        const newPlayerGlobalInfo = players[newPlayerId];
-        const newPlayerTableInfo = table.players[newPlayerId];
-        const oldPlayerInfo = table.players[disconnectedPlayerId];
-        
-        if (!newPlayerTableInfo || !oldPlayerInfo) return;
+    // Ensure the player is in the table as a spectator before taking the seat
+    if (!table.players[newPlayerId]) {
+        table.players[newPlayerId] = {
+            playerName: players[newPlayerId].playerName,
+            socketId: socket.id,
+            isSpectator: true,
+            disconnected: false
+        };
+        socket.join(tableId);
+    }
 
-        const oldPlayerName = oldPlayerInfo.playerName;
-        const newPlayerName = newPlayerGlobalInfo.playerName;
+    const newPlayerTableInfo = table.players[newPlayerId];
+    const oldPlayerInfo = table.players[disconnectedPlayerId];
 
-        newPlayerTableInfo.isSpectator = false;
-        newPlayerTableInfo.disconnected = false;
+    if (!newPlayerTableInfo || !oldPlayerInfo) return;
 
-        table.hands[newPlayerName] = table.hands[oldPlayerName];
-        delete table.hands[oldPlayerName];
+    const oldPlayerName = oldPlayerInfo.playerName;
+    const newPlayerName = newPlayerTableInfo.playerName;
 
-        table.scores[newPlayerName] = table.scores[oldPlayerName];
-        delete table.scores[oldPlayerName];
+    newPlayerTableInfo.isSpectator = false;
+    newPlayerTableInfo.disconnected = false;
 
-        if (table.capturedTricks[oldPlayerName]) {
-            table.capturedTricks[newPlayerName] = table.capturedTricks[oldPlayerName];
-            delete table.capturedTricks[oldPlayerName];
-        }
+    table.hands[newPlayerName] = table.hands[oldPlayerName];
+    delete table.hands[oldPlayerName];
 
-        const orderIndex = table.playerOrderActive.indexOf(oldPlayerName);
-        if (orderIndex > -1) {
-            table.playerOrderActive[orderIndex] = newPlayerName;
-        }
-        if (table.dealer === disconnectedPlayerId) {
-            table.dealer = newPlayerId;
-        }
-        if (table.roundSummary?.dealerOfRoundId === disconnectedPlayerId) {
-            table.roundSummary.dealerOfRoundId = newPlayerId;
-        }
+    table.scores[newPlayerName] = table.scores[oldPlayerName];
+    delete table.scores[oldPlayerName];
 
-        if (table.biddingTurnPlayerName === oldPlayerName) table.biddingTurnPlayerName = newPlayerName;
-        if (table.trickTurnPlayerName === oldPlayerName) table.trickTurnPlayerName = newPlayerName;
-        if (table.trickLeaderName === oldPlayerName) table.trickLeaderName = newPlayerName;
-        if (table.bidWinnerInfo?.playerName === oldPlayerName) table.bidWinnerInfo.playerName = newPlayerName;
-        if (table.insurance.bidderPlayerName === oldPlayerName) table.insurance.bidderPlayerName = newPlayerName;
-        if (table.insurance.defenderOffers[oldPlayerName]) {
-            table.insurance.defenderOffers[newPlayerName] = table.insurance.defenderOffers[oldPlayerName];
-            delete table.insurance.defenderOffers[oldPlayerName];
-        }
-        
-        delete table.players[disconnectedPlayerId];
+    if (table.capturedTricks[oldPlayerName]) {
+        table.capturedTricks[newPlayerName] = table.capturedTricks[oldPlayerName];
+        delete table.capturedTricks[oldPlayerName];
+    }
 
-        table.state = table.preDisconnectState || 'Playing Phase';
-        table.preDisconnectState = null;
+    const orderIndex = table.playerOrderActive.indexOf(oldPlayerName);
+    if (orderIndex > -1) {
+        table.playerOrderActive[orderIndex] = newPlayerName;
+    }
+    if (table.dealer === disconnectedPlayerId) {
+        table.dealer = newPlayerId;
+    }
+    if (table.roundSummary?.dealerOfRoundId === disconnectedPlayerId) {
+        table.roundSummary.dealerOfRoundId = newPlayerId;
+    }
 
-        emitTableUpdate(tableId);
-        emitLobbyUpdate();
-    });
+    if (table.biddingTurnPlayerName === oldPlayerName) table.biddingTurnPlayerName = newPlayerName;
+    if (table.trickTurnPlayerName === oldPlayerName) table.trickTurnPlayerName = newPlayerName;
+    if (table.trickLeaderName === oldPlayerName) table.trickLeaderName = newPlayerName;
+    if (table.bidWinnerInfo?.playerName === oldPlayerName) table.bidWinnerInfo.playerName = newPlayerName;
+    if (table.insurance.bidderPlayerName === oldPlayerName) table.insurance.bidderPlayerName = newPlayerName;
+    if (table.insurance.defenderOffers[oldPlayerName]) {
+        table.insurance.defenderOffers[newPlayerName] = table.insurance.defenderOffers[oldPlayerName];
+        delete table.insurance.defenderOffers[oldPlayerName];
+    }
+    
+    delete table.players[disconnectedPlayerId];
+
+    table.state = table.preDisconnectState || 'Playing Phase';
+    table.preDisconnectState = null;
+
+    emitTableUpdate(tableId);
+    emitLobbyUpdate();
+});
     
     socket.on("startGame", ({ tableId }) => {
         const table = tables[tableId];
