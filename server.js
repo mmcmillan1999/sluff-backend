@@ -1,4 +1,4 @@
-// --- Backend/server.js (v4.9.5) ---
+// --- Backend/server.js (v4.9.6) ---
 require("dotenv").config();
 const http = require("http");
 const { Server } = require("socket.io");
@@ -9,7 +9,7 @@ const { v4: uuidv4 } = require('uuid');
 const app = express();
 const server = http.createServer(app);
 
-const SERVER_VERSION = "4.9.5 - Fixed Take Seat & Disconnect Logic";
+const SERVER_VERSION = "4.9.6 - Fixed Hindsight & Post-Disconnect Dealer";
 console.log(`SLUFF SERVER (${SERVER_VERSION}): Initializing...`);
 
 const io = new Server(server, {
@@ -355,7 +355,6 @@ io.on("connection", (socket) => {
         const oldPlayerName = oldPlayerInfo.playerName;
         const newPlayerName = newPlayerGlobalInfo.playerName;
 
-        // Transfer game data to the new player's object
         newPlayerTableInfo.isSpectator = false;
         newPlayerTableInfo.disconnected = false;
 
@@ -370,11 +369,17 @@ io.on("connection", (socket) => {
             delete table.capturedTricks[oldPlayerName];
         }
 
-        // Update name references throughout the game state
         const orderIndex = table.playerOrderActive.indexOf(oldPlayerName);
         if (orderIndex > -1) {
             table.playerOrderActive[orderIndex] = newPlayerName;
         }
+        if (table.dealer === disconnectedPlayerId) {
+            table.dealer = newPlayerId;
+        }
+        if (table.roundSummary?.dealerOfRoundId === disconnectedPlayerId) {
+            table.roundSummary.dealerOfRoundId = newPlayerId;
+        }
+
         if (table.biddingTurnPlayerName === oldPlayerName) table.biddingTurnPlayerName = newPlayerName;
         if (table.trickTurnPlayerName === oldPlayerName) table.trickTurnPlayerName = newPlayerName;
         if (table.trickLeaderName === oldPlayerName) table.trickLeaderName = newPlayerName;
@@ -385,10 +390,8 @@ io.on("connection", (socket) => {
             delete table.insurance.defenderOffers[oldPlayerName];
         }
         
-        // Remove the old, disconnected player's slot
         delete table.players[disconnectedPlayerId];
 
-        // Resume the game
         table.state = table.preDisconnectState || 'Playing Phase';
         table.preDisconnectState = null;
 
@@ -700,44 +703,38 @@ function calculateRoundScores(tableId) {
     const scoresBeforeExchange = JSON.parse(JSON.stringify(scores));
     let roundMessage = "";
     let insuranceHindsight = null;
+    let actualScoreChanges = {};
 
     if (playerMode === 3) {
         insuranceHindsight = {};
         const scoreDifferenceFrom60 = bidderTotalCardPoints - 60;
         const exchangeValue = Math.abs(scoreDifferenceFrom60) * currentBidMultiplier;
         
-        const hypotheticalPlayedOutChanges = {};
+        const playedOutChanges = {};
         if (scoreDifferenceFrom60 !== 0) {
             if (bidderTotalCardPoints > 60) {
-                hypotheticalPlayedOutChanges[bidWinnerName] = exchangeValue * 2;
-                playerOrderActive.filter(p => p !== bidWinnerName).forEach(def => hypotheticalPlayedOutChanges[def] = -exchangeValue);
+                playedOutChanges[bidWinnerName] = exchangeValue * 2;
+                playerOrderActive.filter(p => p !== bidWinnerName).forEach(def => playedOutChanges[def] = -exchangeValue);
             } else {
-                hypotheticalPlayedOutChanges[bidWinnerName] = -exchangeValue * 3;
-                playerOrderActive.filter(p => p !== bidWinnerName).forEach(def => hypotheticalPlayedOutChanges[def] = exchangeValue);
-                hypotheticalPlayedOutChanges[PLACEHOLDER_ID] = exchangeValue;
+                playedOutChanges[bidWinnerName] = -exchangeValue * 3;
+                playerOrderActive.filter(p => p !== bidWinnerName).forEach(def => playedOutChanges[def] = exchangeValue);
+                playedOutChanges[PLACEHOLDER_ID] = exchangeValue;
             }
         }
 
-        const hypotheticalInsuranceChanges = {};
+        const insuranceChanges = {};
         const agreement = insurance.dealExecuted ? insurance.executedDetails.agreement : { bidderRequirement: insurance.bidderRequirement, defenderOffers: insurance.defenderOffers };
-        hypotheticalInsuranceChanges[bidWinnerName] = agreement.bidderRequirement;
+        insuranceChanges[bidWinnerName] = agreement.bidderRequirement;
         for (const defenderName in agreement.defenderOffers) {
-             hypotheticalInsuranceChanges[defenderName] = -agreement.defenderOffers[defenderName];
+             insuranceChanges[defenderName] = -agreement.defenderOffers[defenderName];
         }
 
-        if (insurance.dealExecuted) {
-            playerOrderActive.forEach(pName => {
-                const insuranceChange = hypotheticalInsuranceChanges[pName] || 0;
-                const playedOutChange = hypotheticalPlayedOutChanges[pName] || 0;
-                insuranceHindsight[pName] = insuranceChange - playedOutChange;
-            });
-        } else {
-             playerOrderActive.forEach(pName => {
-                const playedOutChange = hypotheticalPlayedOutChanges[pName] || 0;
-                const insuranceChange = hypotheticalInsuranceChanges[pName] || 0;
-                insuranceHindsight[pName] = insuranceChange - playedOutChange;
-            });
-        }
+        playerOrderActive.forEach(pName => {
+            insuranceHindsight[pName] = {
+                actual: insurance.dealExecuted ? (insuranceChanges[pName] || 0) : (playedOutChanges[pName] || 0),
+                potential: insurance.dealExecuted ? (playedOutChanges[pName] || 0) : (insuranceChanges[pName] || 0)
+            };
+        });
     }
 
     if (insurance.dealExecuted) {
