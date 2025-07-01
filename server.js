@@ -1,4 +1,4 @@
-// --- Backend/server.js (v4.9.4) ---
+// --- Backend/server.js (v4.9.5) ---
 require("dotenv").config();
 const http = require("http");
 const { Server } = require("socket.io");
@@ -9,7 +9,7 @@ const { v4: uuidv4 } = require('uuid');
 const app = express();
 const server = http.createServer(app);
 
-const SERVER_VERSION = "4.9.4 - Resilient Disconnects";
+const SERVER_VERSION = "4.9.5 - Fixed Take Seat & Disconnect Logic";
 console.log(`SLUFF SERVER (${SERVER_VERSION}): Initializing...`);
 
 const io = new Server(server, {
@@ -57,7 +57,7 @@ function getInitialGameData(tableId) {
     return {
         tableId: tableId,
         state: "Waiting for Players",
-        preDisconnectState: null, // For storing state before a player leaves
+        preDisconnectState: null, 
         players: {},
         playerOrderActive: [],
         dealer: null,
@@ -325,7 +325,7 @@ io.on("connection", (socket) => {
         if(wasActivePlayer && table.gameStarted && table.state !== 'Awaiting Replacement'){ 
             table.preDisconnectState = table.state;
             table.state = 'Awaiting Replacement';
-            table.players[playerId] = { ...players[playerId], disconnected: true, isSpectator: false }; // Re-add as disconnected
+            table.players[playerId] = { ...players[playerId], disconnected: true, isSpectator: false }; 
         } else {
             const activePlayerCount = Object.values(table.players).filter(p=>!p.isSpectator && !p.disconnected).length;
             if(activePlayerCount < 3 && table.gameStarted) {
@@ -346,32 +346,31 @@ io.on("connection", (socket) => {
         const table = tables[tableId];
         if (!table || table.state !== 'Awaiting Replacement' || !table.players[disconnectedPlayerId]?.disconnected) return;
 
-        const newPlayerData = players[newPlayerId];
-        const oldPlayerData = table.players[disconnectedPlayerId];
-        const oldPlayerName = oldPlayerData.playerName;
-        const newPlayerName = newPlayerData.playerName;
+        const newPlayerGlobalInfo = players[newPlayerId];
+        const newPlayerTableInfo = table.players[newPlayerId];
+        const oldPlayerInfo = table.players[disconnectedPlayerId];
+        
+        if (!newPlayerTableInfo || !oldPlayerInfo) return;
 
-        // Transfer properties to the old player slot
-        table.players[disconnectedPlayerId] = {
-            ...oldPlayerData,
-            playerName: newPlayerName,
-            socketId: newPlayerData.socketId,
-            disconnected: false,
-        };
+        const oldPlayerName = oldPlayerInfo.playerName;
+        const newPlayerName = newPlayerGlobalInfo.playerName;
 
-        // Update name references throughout the game state
-        if (table.scores[oldPlayerName] !== undefined) {
-            table.scores[newPlayerName] = table.scores[oldPlayerName];
-            delete table.scores[oldPlayerName];
-        }
-        if (table.hands[oldPlayerName]) {
-            table.hands[newPlayerName] = table.hands[oldPlayerName];
-            delete table.hands[oldPlayerName];
-        }
+        // Transfer game data to the new player's object
+        newPlayerTableInfo.isSpectator = false;
+        newPlayerTableInfo.disconnected = false;
+
+        table.hands[newPlayerName] = table.hands[oldPlayerName];
+        delete table.hands[oldPlayerName];
+
+        table.scores[newPlayerName] = table.scores[oldPlayerName];
+        delete table.scores[oldPlayerName];
+
         if (table.capturedTricks[oldPlayerName]) {
             table.capturedTricks[newPlayerName] = table.capturedTricks[oldPlayerName];
             delete table.capturedTricks[oldPlayerName];
         }
+
+        // Update name references throughout the game state
         const orderIndex = table.playerOrderActive.indexOf(oldPlayerName);
         if (orderIndex > -1) {
             table.playerOrderActive[orderIndex] = newPlayerName;
@@ -380,9 +379,14 @@ io.on("connection", (socket) => {
         if (table.trickTurnPlayerName === oldPlayerName) table.trickTurnPlayerName = newPlayerName;
         if (table.trickLeaderName === oldPlayerName) table.trickLeaderName = newPlayerName;
         if (table.bidWinnerInfo?.playerName === oldPlayerName) table.bidWinnerInfo.playerName = newPlayerName;
+        if (table.insurance.bidderPlayerName === oldPlayerName) table.insurance.bidderPlayerName = newPlayerName;
+        if (table.insurance.defenderOffers[oldPlayerName]) {
+            table.insurance.defenderOffers[newPlayerName] = table.insurance.defenderOffers[oldPlayerName];
+            delete table.insurance.defenderOffers[oldPlayerName];
+        }
         
-        // Remove the new player's old spectator entry
-        delete table.players[newPlayerId];
+        // Remove the old, disconnected player's slot
+        delete table.players[disconnectedPlayerId];
 
         // Resume the game
         table.state = table.preDisconnectState || 'Playing Phase';
