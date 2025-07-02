@@ -1,4 +1,4 @@
-// --- Backend/server.js (v6.1.1 - Insurance & Linger) ---
+// --- Backend/server.js (v6.1.2 - Hindsight & Frog Logic) ---
 require("dotenv").config();
 const http = require("http");
 const express = require("express");
@@ -15,7 +15,7 @@ const io = new Server(server, {
   cors: { origin: "*", methods: ["GET", "POST"] },
 });
 
-const SERVER_VERSION = "6.1.1 - Insurance & Linger";
+const SERVER_VERSION = "6.1.2 - Hindsight & Frog Logic";
 let pool; 
 
 // --- MIDDLEWARE ---
@@ -78,7 +78,7 @@ const createDbTables = async (dbPool) => {
         console.log("Database 'users' table is ready.");
     } catch (err) {
         console.error("Error creating database tables:", err);
-        throw err; // Propagate error to stop server start if DB is not ready
+        throw err;
     }
 };
 
@@ -155,7 +155,7 @@ io.use((socket, next) => {
     if (!token) { return next(new Error("Authentication error: No token provided.")); }
     jwt.verify(token, process.env.JWT_SECRET, (err, user) => {
         if (err) { return next(new Error("Authentication error: Invalid token.")); }
-        socket.user = user; // Attach user payload to the socket object
+        socket.user = user;
         next();
     });
 });
@@ -417,7 +417,7 @@ io.on("connection", (socket) => {
                         currentTable.state = "Playing Phase";
                         emitTableUpdate(tableId);
                     }
-                }, 1000); // Linger time set to 1 second
+                }, 1000);
             }
         } else {
             const currentTurnPlayerIndex = table.playerOrderActive.indexOf(username);
@@ -621,13 +621,19 @@ function calculateRoundScores(tableId) {
             defendersTotalCardPoints += playerTrickPoints;
         }
     });
-
+    
+    // Determine which cards to count from the "widow" pile
+    let widowPoints = 0;
+    let widowForReveal = [...originalDealtWidow]; // Default to original widow
     if (bidType === "Frog") {
-        bidderTotalCardPoints += calculateCardPoints(widowDiscardsForFrogBidder);
+        widowPoints = calculateCardPoints(widowDiscardsForFrogBidder);
+        widowForReveal = [...widowDiscardsForFrogBidder]; // UPDATE: Show discarded cards for Frog
+        bidderTotalCardPoints += widowPoints;
     } else if (bidType === "Solo") {
-        bidderTotalCardPoints += calculateCardPoints(originalDealtWidow);
+        widowPoints = calculateCardPoints(originalDealtWidow);
+        bidderTotalCardPoints += widowPoints;
     } else if (bidType === "Heart Solo") {
-        const widowPoints = calculateCardPoints(originalDealtWidow);
+        widowPoints = calculateCardPoints(originalDealtWidow);
         if (table.trickLeaderName === bidWinnerName) {
             bidderTotalCardPoints += widowPoints;
         } else {
@@ -667,31 +673,53 @@ function calculateRoundScores(tableId) {
     
     if (playerMode === 3) {
         insuranceHindsight = {};
-        const playedOutChanges = {};
-        const scoreDifferenceFrom60 = bidderTotalCardPoints - 60;
-        const exchangeValue = Math.abs(scoreDifferenceFrom60) * currentBidMultiplier;
-        if (scoreDifferenceFrom60 !== 0) {
-            if (bidderTotalCardPoints > 60) {
-                playedOutChanges[bidWinnerName] = exchangeValue * 2;
-                playerOrderActive.filter(p => p !== bidWinnerName).forEach(def => playedOutChanges[def] = -exchangeValue);
+        const defenders = playerOrderActive.filter(p => p !== bidWinnerName);
+        
+        // Calculate what ACTUALLY happened
+        const actualChange = {};
+        if (insurance.dealExecuted) {
+            const agreement = insurance.executedDetails.agreement;
+            actualChange[bidWinnerName] = agreement.bidderRequirement;
+            defenders.forEach(def => actualChange[def] = -agreement.defenderOffers[def]);
+        } else {
+            const scoreDifferenceFrom60 = bidderTotalCardPoints - 60;
+            const exchangeValue = Math.abs(scoreDifferenceFrom60) * currentBidMultiplier;
+            if (scoreDifferenceFrom60 > 0) {
+                actualChange[bidWinnerName] = exchangeValue * 2;
+                defenders.forEach(def => actualChange[def] = -exchangeValue);
+            } else if (scoreDifferenceFrom60 < 0) {
+                actualChange[bidWinnerName] = -exchangeValue * 3;
+                defenders.forEach(def => actualChange[def] = exchangeValue);
             } else {
-                playedOutChanges[bidWinnerName] = -exchangeValue * 3;
-                playerOrderActive.filter(p => p !== bidWinnerName).forEach(def => playedOutChanges[def] = exchangeValue);
-                playedOutChanges[PLACEHOLDER_ID] = exchangeValue;
+                 playerOrderActive.forEach(p => actualChange[p] = 0);
             }
         }
-        const insuranceAgreement = insurance.dealExecuted ? insurance.executedDetails.agreement : null;
-        const potentialInsuranceChanges = {};
-        const bidderReq = insurance.dealExecuted ? insuranceAgreement.bidderRequirement : insurance.bidderRequirement;
-        const defenderOff = insurance.dealExecuted ? insuranceAgreement.defenderOffers : insurance.defenderOffers;
-        potentialInsuranceChanges[bidWinnerName] = bidderReq;
-        for (const defenderName in defenderOff) {
-            potentialInsuranceChanges[defenderName] = -defenderOff[defenderName];
+
+        // Calculate what WOULD have happened in the alternate scenario
+        const potentialChange = {};
+        if (insurance.dealExecuted) {
+            // The alternate scenario is playing it out
+            const scoreDifferenceFrom60 = bidderTotalCardPoints - 60;
+            const exchangeValue = Math.abs(scoreDifferenceFrom60) * currentBidMultiplier;
+             if (scoreDifferenceFrom60 > 0) {
+                potentialChange[bidWinnerName] = exchangeValue * 2;
+                defenders.forEach(def => potentialChange[def] = -exchangeValue);
+            } else if (scoreDifferenceFrom60 < 0) {
+                potentialChange[bidWinnerName] = -exchangeValue * 3;
+                defenders.forEach(def => potentialChange[def] = exchangeValue);
+            } else {
+                 playerOrderActive.forEach(p => potentialChange[p] = 0);
+            }
+        } else {
+            // The alternate scenario is making the deal at the final asking price
+            potentialChange[bidWinnerName] = insurance.bidderRequirement;
+            // For hindsight, assume defenders would have split the requirement evenly
+            const evenSplit = Math.round(insurance.bidderRequirement / defenders.length);
+            defenders.forEach(def => potentialChange[def] = -evenSplit);
         }
+
         playerOrderActive.forEach(pName => {
-            const actualChange = insurance.dealExecuted ? (potentialInsuranceChanges[pName] || 0) : (playedOutChanges[pName] || 0);
-            const potentialChange = insurance.dealExecuted ? (playedOutChanges[pName] || 0) : (potentialInsuranceChanges[pName] || 0);
-            insuranceHindsight[pName] = actualChange - potentialChange;
+            insuranceHindsight[pName] = (actualChange[pName] || 0) - (potentialChange[pName] || 0);
         });
     }
 
@@ -715,10 +743,11 @@ function calculateRoundScores(tableId) {
         isGameOver,
         gameWinner,
         dealerOfRoundId: table.dealer,
-        widowForReveal: table.originalDealtWidow,
+        widowForReveal,
         insuranceDealWasMade: insurance.dealExecuted,
         insuranceDetails: insurance.dealExecuted ? insurance.executedDetails : null,
         insuranceHindsight: insuranceHindsight,
+        allTricks: table.capturedTricks // Send all captured tricks for detailed summary
     };
     
     table.state = isGameOver ? "Game Over" : "Awaiting Next Round Trigger";
