@@ -1,4 +1,4 @@
-// --- Backend/server.js (v6.1.0 - Corrected Merge) ---
+// --- Backend/server.js (v6.1.1 - Insurance & Linger) ---
 require("dotenv").config();
 const http = require("http");
 const express = require("express");
@@ -15,7 +15,7 @@ const io = new Server(server, {
   cors: { origin: "*", methods: ["GET", "POST"] },
 });
 
-const SERVER_VERSION = "6.1.0 - Corrected Merge";
+const SERVER_VERSION = "6.1.1 - Insurance & Linger";
 let pool; 
 
 // --- MIDDLEWARE ---
@@ -417,7 +417,7 @@ io.on("connection", (socket) => {
                         currentTable.state = "Playing Phase";
                         emitTableUpdate(tableId);
                     }
-                }, 2000);
+                }, 1000); // Linger time set to 1 second
             }
         } else {
             const currentTurnPlayerIndex = table.playerOrderActive.indexOf(username);
@@ -426,6 +426,43 @@ io.on("connection", (socket) => {
         }
     });
     
+    socket.on("updateInsuranceSetting", ({ tableId, settingType, value }) => {
+        const table = tables[tableId];
+        const { username } = socket.user;
+        if (!username || !table) return socket.emit("error", "Player or table not found.");
+        if (!table.insurance.isActive) return socket.emit("error", "Insurance is not currently active.");
+        if (table.insurance.dealExecuted) return socket.emit("error", "Insurance deal already made, settings are locked.");
+        
+        const multiplier = table.insurance.bidMultiplier;
+        const parsedValue = parseInt(value, 10);
+        if (isNaN(parsedValue)) return socket.emit("error", "Invalid value. Must be a whole number.");
+
+        if (settingType === 'bidderRequirement') {
+            if (username !== table.insurance.bidderPlayerName) return socket.emit("error", "Only the bid winner can update the requirement.");
+            const minReq = -120 * multiplier; const maxReq = 120 * multiplier;
+            if (parsedValue < minReq || parsedValue > maxReq) return socket.emit("error", `Requirement out of range [${minReq}, ${maxReq}].`);
+            table.insurance.bidderRequirement = parsedValue;
+        } else if (settingType === 'defenderOffer') {
+            if (!table.insurance.defenderOffers.hasOwnProperty(username)) return socket.emit("error", "You are not a listed defender.");
+            const minOffer = -60 * multiplier; const maxOffer = 60 * multiplier;
+            if (parsedValue < minOffer || parsedValue > maxOffer) return socket.emit("error", `Offer out of range [${minOffer}, ${maxOffer}].`);
+            table.insurance.defenderOffers[username] = parsedValue;
+        } else {
+            return socket.emit("error", "Invalid insurance setting type.");
+        }
+
+        const { bidderRequirement, defenderOffers } = table.insurance;
+        const sumOfDefenderOffers = Object.values(defenderOffers || {}).reduce((sum, offer) => sum + (offer || 0), 0);
+        if (bidderRequirement <= sumOfDefenderOffers) {
+            table.insurance.dealExecuted = true;
+            table.insurance.executedDetails = {
+                agreement: { bidderPlayerName: table.insurance.bidderPlayerName, bidderRequirement: bidderRequirement, defenderOffers: { ...defenderOffers } },
+            };
+            console.log(`[${tableId}] INSURANCE DEAL EXECUTED!`);
+        }
+        emitTableUpdate(tableId);
+    });
+
     socket.on("requestNextRound", ({ tableId }) => {
         const table = tables[tableId];
         if (table && table.state === "Awaiting Next Round Trigger" && socket.user.id === table.roundSummary?.dealerOfRoundId) {
@@ -480,6 +517,18 @@ function transitionToPlayingPhase(table) {
     table.lastCompletedTrick = null;
     table.trickLeaderName = table.bidWinnerInfo.playerName;
     table.trickTurnPlayerName = table.bidWinnerInfo.playerName;
+
+    if (table.playerMode === 3) {
+        table.insurance.isActive = true;
+        const multiplier = BID_MULTIPLIERS[table.bidWinnerInfo.bid];
+        table.insurance.bidMultiplier = multiplier;
+        table.insurance.bidderPlayerName = table.bidWinnerInfo.playerName;
+        table.insurance.bidderRequirement = 120 * multiplier;
+        const defenders = table.playerOrderActive.filter(pName => pName !== table.bidWinnerInfo.playerName);
+        defenders.forEach(defName => {
+            table.insurance.defenderOffers[defName] = -60 * multiplier;
+        });
+    }
     emitTableUpdate(table.tableId);
 }
 
@@ -555,7 +604,7 @@ function calculateRoundScores(tableId) {
     const table = tables[tableId];
     if (!table || !table.bidWinnerInfo) return;
 
-    const { bidWinnerInfo, playerOrderActive, playerMode, scores, capturedTricks, widowDiscardsForFrogBidder, originalDealtWidow } = table;
+    const { bidWinnerInfo, playerOrderActive, playerMode, scores, capturedTricks, widowDiscardsForFrogBidder, originalDealtWidow, insurance } = table;
     const bidWinnerName = bidWinnerInfo.playerName;
     const bidType = bidWinnerInfo.bid;
     const currentBidMultiplier = BID_MULTIPLIERS[bidType];
@@ -587,37 +636,63 @@ function calculateRoundScores(tableId) {
     }
 
     let roundMessage = "";
-    const pointsDelta = Math.abs(bidderTotalCardPoints - 60);
-    const exchangeValue = pointsDelta * currentBidMultiplier;
+    let insuranceHindsight = null;
 
-    if (bidderTotalCardPoints > 60) {
-        let totalPointsGained = 0;
-        playerOrderActive.forEach(pName => {
-            if (pName !== bidWinnerName) {
-                scores[pName] -= exchangeValue;
-                totalPointsGained += exchangeValue;
-            }
-        });
-        scores[bidWinnerName] += totalPointsGained;
-        roundMessage = `${bidWinnerName} succeeded, capturing ${bidderTotalCardPoints} points!`;
-    } else {
-        let totalPointsLost = 0;
-        const opponents = playerOrderActive.filter(pName => pName !== bidWinnerName);
-        opponents.forEach(oppName => {
-            scores[oppName] += exchangeValue;
-            totalPointsLost += exchangeValue;
-        });
-
-        if (playerMode === 4) {
-            const dealerName = getPlayerNameByUserId(table.dealer, table);
-            scores[dealerName] += exchangeValue;
-            totalPointsLost += exchangeValue;
-        } else {
-             scores[PLACEHOLDER_ID] += exchangeValue;
-             totalPointsLost += exchangeValue;
+    if (insurance.dealExecuted) {
+        const agreement = insurance.executedDetails.agreement;
+        scores[agreement.bidderPlayerName] += agreement.bidderRequirement;
+        for (const defenderName in agreement.defenderOffers) {
+            scores[defenderName] -= agreement.defenderOffers[defenderName];
         }
-        scores[bidWinnerName] -= totalPointsLost;
-        roundMessage = `${bidWinnerName} failed, capturing only ${bidderTotalCardPoints} points.`;
+        roundMessage = `Insurance deal executed. Points exchanged based on agreement.`;
+    } else {
+        const scoreDifferenceFrom60 = bidderTotalCardPoints - 60;
+        const exchangeValue = Math.abs(scoreDifferenceFrom60) * currentBidMultiplier;
+        if (scoreDifferenceFrom60 === 0) { roundMessage = `${bidWinnerName} scored exactly 60. No points exchanged.`; } 
+        else if (bidderTotalCardPoints > 60) {
+            let totalPointsGained = 0;
+            playerOrderActive.forEach(pName => { if (pName !== bidWinnerName) { scores[pName] -= exchangeValue; totalPointsGained += exchangeValue; } });
+            scores[bidWinnerName] += totalPointsGained;
+            roundMessage = `${bidWinnerName} succeeded! Gains ${totalPointsGained} points.`;
+        } else {
+            let totalPointsLost = 0;
+            const activeOpponents = playerOrderActive.filter(pName => pName !== bidWinnerName);
+            activeOpponents.forEach(oppName => { scores[oppName] += exchangeValue; totalPointsLost += exchangeValue; });
+            if (playerMode === 3) { scores[PLACEHOLDER_ID] += exchangeValue; totalPointsLost += exchangeValue; }
+            else if (playerMode === 4) { const dealerName = getPlayerNameByUserId(table.dealer, table); if (dealerName && !playerOrderActive.includes(dealerName)) { scores[dealerName] += exchangeValue; totalPointsLost += exchangeValue; } }
+            scores[bidWinnerName] -= totalPointsLost;
+            roundMessage = `${bidWinnerName} failed. Loses ${totalPointsLost} points.`;
+        }
+    }
+    
+    if (playerMode === 3) {
+        insuranceHindsight = {};
+        const playedOutChanges = {};
+        const scoreDifferenceFrom60 = bidderTotalCardPoints - 60;
+        const exchangeValue = Math.abs(scoreDifferenceFrom60) * currentBidMultiplier;
+        if (scoreDifferenceFrom60 !== 0) {
+            if (bidderTotalCardPoints > 60) {
+                playedOutChanges[bidWinnerName] = exchangeValue * 2;
+                playerOrderActive.filter(p => p !== bidWinnerName).forEach(def => playedOutChanges[def] = -exchangeValue);
+            } else {
+                playedOutChanges[bidWinnerName] = -exchangeValue * 3;
+                playerOrderActive.filter(p => p !== bidWinnerName).forEach(def => playedOutChanges[def] = exchangeValue);
+                playedOutChanges[PLACEHOLDER_ID] = exchangeValue;
+            }
+        }
+        const insuranceAgreement = insurance.dealExecuted ? insurance.executedDetails.agreement : null;
+        const potentialInsuranceChanges = {};
+        const bidderReq = insurance.dealExecuted ? insuranceAgreement.bidderRequirement : insurance.bidderRequirement;
+        const defenderOff = insurance.dealExecuted ? insuranceAgreement.defenderOffers : insurance.defenderOffers;
+        potentialInsuranceChanges[bidWinnerName] = bidderReq;
+        for (const defenderName in defenderOff) {
+            potentialInsuranceChanges[defenderName] = -defenderOff[defenderName];
+        }
+        playerOrderActive.forEach(pName => {
+            const actualChange = insurance.dealExecuted ? (potentialInsuranceChanges[pName] || 0) : (playedOutChanges[pName] || 0);
+            const potentialChange = insurance.dealExecuted ? (playedOutChanges[pName] || 0) : (potentialInsuranceChanges[pName] || 0);
+            insuranceHindsight[pName] = actualChange - potentialChange;
+        });
     }
 
     let isGameOver = false;
@@ -641,6 +716,9 @@ function calculateRoundScores(tableId) {
         gameWinner,
         dealerOfRoundId: table.dealer,
         widowForReveal: table.originalDealtWidow,
+        insuranceDealWasMade: insurance.dealExecuted,
+        insuranceDetails: insurance.dealExecuted ? insurance.executedDetails : null,
+        insuranceHindsight: insuranceHindsight,
     };
     
     table.state = isGameOver ? "Game Over" : "Awaiting Next Round Trigger";
