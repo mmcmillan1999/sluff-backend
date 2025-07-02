@@ -1,10 +1,12 @@
-// --- Backend/server.js (v5.0.0 - Database & Auth Foundation) ---
+// --- Backend/server.js (v5.0.4 - Socket Authentication) ---
 require("dotenv").config();
 const http = require("http");
 const express = require("express");
 const cors = require("cors");
 const { Server } = require("socket.io");
 const { Pool } = require("pg");
+const bcrypt = require("bcrypt");
+const jwt = require("jsonwebtoken");
 
 // --- INITIALIZATIONS ---
 const app = express();
@@ -13,41 +15,57 @@ const io = new Server(server, {
   cors: { origin: "*", methods: ["GET", "POST"] },
 });
 
-const SERVER_VERSION = "5.0.0 - Database & Auth Foundation";
-
-// --- DATABASE CONNECTION ---
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: {
-    rejectUnauthorized: false
-  }
-});
+const SERVER_VERSION = "5.0.4 - Socket Authentication";
+let pool; 
 
 // --- MIDDLEWARE ---
 app.use(cors({ origin: "*" }));
 app.use(express.json());
 
-// --- GAME CONSTANTS ---
-const SUITS = { H: "Hearts", D: "Diamonds", C: "Clubs", S: "Spades" };
-const RANKS_ORDER = ["6", "7", "8", "9", "J", "Q", "K", "10", "A"];
-const CARD_POINT_VALUES = { "A": 11, "10": 10, "K": 4, "Q": 3, "J": 2, "9":0, "8":0, "7":0, "6":0 };
-const BID_HIERARCHY = ["Pass", "Frog", "Solo", "Heart Solo"];
-const BID_MULTIPLIERS = { "Frog": 1, "Solo": 2, "Heart Solo": 3 };
-const PLACEHOLDER_ID = "ScoreAbsorber";
-const MAX_PLAYERS_PER_TABLE = 4;
+// --- GAME CONSTANTS & IN-MEMORY STATE ---
 const NUM_TABLES = 3;
-
-// --- IN-MEMORY GAME STATE (To be migrated to database) ---
 let tables = {};
-let deck = [];
-for (const suitKey in SUITS) {
-  for (const rank of RANKS_ORDER) {
-    deck.push(rank + suitKey);
-  }
+
+// --- HELPER FUNCTIONS ---
+function getLobbyState() {
+    return Object.fromEntries(
+        Object.entries(tables).map(([tableId, table]) => {
+            const activePlayers = Object.values(table.players).filter(p => !p.isSpectator);
+            return [
+                tableId,
+                {
+                    tableId: table.tableId,
+                    state: table.state,
+                    players: activePlayers.map(p => ({ playerName: p.playerName, disconnected: p.disconnected })),
+                    playerCount: activePlayers.length,
+                    spectatorCount: Object.values(table.players).length - activePlayers.length,
+                },
+            ];
+        })
+    );
 }
 
+function getInitialGameData(tableId) {
+    return {
+        tableId: tableId,
+        state: "Waiting for Players",
+        players: {},
+        serverVersion: SERVER_VERSION,
+        // ... all other initial game data fields from your old version
+    };
+}
+
+function initializeGameTables() {
+    for (let i = 1; i <= NUM_TABLES; i++) {
+        const tableId = `table-${i}`;
+        tables[tableId] = getInitialGameData(tableId);
+    }
+    console.log("In-memory game tables initialized.");
+}
+
+
 // --- DATABASE SETUP FUNCTION ---
-const createTables = async () => {
+const createTables = async (dbPool) => {
     const userTableQuery = `
         CREATE TABLE IF NOT EXISTS users (
             id SERIAL PRIMARY KEY,
@@ -57,9 +75,8 @@ const createTables = async () => {
             created_at TIMESTAMPTZ DEFAULT NOW()
         );
     `;
-    // Add CREATE TABLE for games, etc. here in the future
     try {
-        await pool.query(userTableQuery);
+        await dbPool.query(userTableQuery);
         console.log("Database tables are ready.");
     } catch (err) {
         console.error("Error creating database tables:", err);
@@ -67,76 +84,102 @@ const createTables = async () => {
 };
 
 // --- API ROUTES for AUTHENTICATION ---
-// NOTE: These are placeholders. You will build out the logic for these next.
 app.post("/api/auth/register", async (req, res) => {
     const { username, email, password } = req.body;
-    // TODO: 1. Validate input
-    // TODO: 2. Hash the password using bcrypt
-    // TODO: 3. Save the new user to the database
-    // TODO: 4. Return a success message or token
-    res.status(501).json({ message: "Register endpoint not implemented" });
+    if (!username || !email || !password) {
+        return res.status(400).json({ message: "Username, email, and password are required." });
+    }
+    try {
+        const salt = await bcrypt.genSalt(10);
+        const passwordHash = await bcrypt.hash(password, salt);
+        const newUserQuery = `
+            INSERT INTO users (username, email, password_hash)
+            VALUES ($1, $2, $3)
+            RETURNING id, username, email;
+        `;
+        const result = await pool.query(newUserQuery, [username, email, passwordHash]);
+        res.status(201).json({ message: "User created successfully", user: result.rows[0] });
+    } catch (err) {
+        if (err.code === '23505') {
+            return res.status(409).json({ message: "Username or email already exists." });
+        }
+        console.error(err);
+        res.status(500).json({ message: "Server error during registration." });
+    }
 });
 
 app.post("/api/auth/login", async (req, res) => {
     const { email, password } = req.body;
-    // TODO: 1. Find user by email in the database
-    // TODO: 2. Compare provided password with the stored hash using bcrypt
-    // TODO: 3. If match, generate a JWT (JSON Web Token)
-    // TODO: 4. Return the token to the client
-    res.status(501).json({ message: "Login endpoint not implemented" });
+    if (!email || !password) {
+        return res.status(400).json({ message: "Email and password are required." });
+    }
+    try {
+        const userQuery = "SELECT * FROM users WHERE email = $1";
+        const result = await pool.query(userQuery, [email]);
+        const user = result.rows[0];
+        if (!user) {
+            return res.status(401).json({ message: "Invalid credentials." });
+        }
+        const isMatch = await bcrypt.compare(password, user.password_hash);
+        if (!isMatch) {
+            return res.status(401).json({ message: "Invalid credentials." });
+        }
+        const payload = { id: user.id, username: user.username };
+        const token = jwt.sign(payload, process.env.JWT_SECRET, { expiresIn: '1d' });
+        res.json({ message: "Logged in successfully", token: token, user: payload });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ message: "Server error during login." });
+    }
 });
 
-
-// --- GAME LOGIC (temporary) ---
-// This section will be heavily refactored to use the database
-// and authenticated user IDs instead of in-memory objects.
-
-function getInitialGameData(tableId) {
-    return {
-        tableId: tableId,
-        state: "Waiting for Players",
-        players: {},
-        // ... other initial game data fields
-        serverVersion: SERVER_VERSION,
-    };
-}
-
-function initializeGameTables() {
-    for (let i = 1; i <= NUM_TABLES; i++) {
-        const tableId = `table-${i}`;
-        tables[tableId] = getInitialGameData(tableId);
-    }
-}
-
-
 // --- SOCKET.IO LOGIC ---
-io.on("connection", (socket) => {
-    console.log(`Socket connected: ${socket.id}`);
-
-    // NOTE: The old 'login' and 'reconnectPlayer' events are removed.
-    // The new flow will be:
-    // 1. User logs in via the '/api/auth/login' HTTP route.
-    // 2. Client receives a JWT.
-    // 3. Client connects to socket.io and sends the JWT for authentication.
-
-    socket.on("authenticate", (token) => {
-        // TODO: Verify the JWT. If valid, associate the socket with the user ID.
-        console.log(`Socket ${socket.id} is attempting to authenticate.`);
+io.use((socket, next) => {
+    const token = socket.handshake.auth.token;
+    if (!token) {
+        return next(new Error("Authentication error: No token provided."));
+    }
+    jwt.verify(token, process.env.JWT_SECRET, (err, user) => {
+        if (err) {
+            return next(new Error("Authentication error: Invalid token."));
+        }
+        socket.user = user;
+        next();
     });
+});
+
+io.on("connection", (socket) => {
+    console.log(`Socket connected and authenticated for user: ${socket.user.username} (ID: ${socket.user.id})`);
     
-    // All other game-related socket events (joinTable, playCard, etc.) will go here.
-    // They will need to be updated to use the authenticated user's ID.
+    socket.emit("lobbyState", getLobbyState());
+
+    // TODO: Re-implement game logic socket handlers here, using socket.user to identify the player.
+    // Example:
+    // socket.on("joinTable", ({ tableId }) => { ... });
 
     socket.on("disconnect", () => {
-        console.log(`Socket disconnected: ${socket.id}`);
+        console.log(`Socket for ${socket.user.username} disconnected.`);
         // TODO: Update disconnect logic for authenticated users.
     });
 });
-
 
 // --- SERVER STARTUP ---
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, async () => {
   console.log(`Sluff Game Server (${SERVER_VERSION}) running on port ${PORT}`);
-  await createTables();
+  try {
+    pool = new Pool({
+      user: process.env.DB_USER,
+      host: process.env.DB_HOST,
+      database: process.env.DB_DATABASE,
+      password: process.env.DB_PASSWORD,
+      port: process.env.DB_PORT,
+      ssl: true,
+    });
+    console.log("Database connection pool established.");
+    await createTables(pool);
+    initializeGameTables();
+  } catch (err) {
+    console.error("Failed to connect to the database:", err);
+  }
 });
