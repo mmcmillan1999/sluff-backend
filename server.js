@@ -1,4 +1,4 @@
-// --- Backend/server.js (v6.1.2 - Hindsight & Frog Logic) ---
+// --- Backend/server.js (v6.1.3 - Reset Logic Fix) ---
 require("dotenv").config();
 const http = require("http");
 const express = require("express");
@@ -15,7 +15,7 @@ const io = new Server(server, {
   cors: { origin: "*", methods: ["GET", "POST"] },
 });
 
-const SERVER_VERSION = "6.1.2 - Hindsight & Frog Logic";
+const SERVER_VERSION = "6.1.3 - Reset Logic Fix";
 let pool; 
 
 // --- MIDDLEWARE ---
@@ -82,17 +82,49 @@ const createDbTables = async (dbPool) => {
     }
 };
 
-const resetTable = (tableId, keepPlayersAsSpectators = true) => {
+const resetTable = (tableId) => {
     if (!tables[tableId]) return;
     const originalPlayers = { ...tables[tableId].players };
-    const originalScores = { ...tables[tableId].scores };
+    
+    // Reset the table to its initial data structure
     tables[tableId] = getInitialGameData(tableId);
-    if (keepPlayersAsSpectators) {
-        for (const userId in originalPlayers) {
-            tables[tableId].players[userId] = { ...originalPlayers[userId], isSpectator: true, disconnected: originalPlayers[userId].disconnected };
-            tables[tableId].scores[originalPlayers[userId].playerName] = originalScores[originalPlayers[userId].playerName] ?? 120;
+
+    const activePlayerNames = [];
+    
+    // Re-add the players from the original table
+    for (const userId in originalPlayers) {
+        const playerInfo = originalPlayers[userId];
+        
+        // Add player back, ensuring they are NOT a spectator
+        tables[tableId].players[userId] = { 
+            ...playerInfo, 
+            isSpectator: false, 
+            disconnected: playerInfo.disconnected 
+        };
+
+        // Explicitly reset the player's score to 120
+        tables[tableId].scores[playerInfo.playerName] = 120;
+
+        // If they were an active player before, add them to the new active list
+        if (!playerInfo.isSpectator) {
+            activePlayerNames.push(playerInfo.playerName);
         }
     }
+
+    // Restore the active player order
+    tables[tableId].playerOrderActive = activePlayerNames;
+    tables[tableId].gameStarted = true; // Keep the game in a "started" state so new players can't join seats
+    tables[tableId].playerMode = activePlayerNames.length;
+
+
+    // Update the table state based on the number of active players
+    if (activePlayerNames.length >= 3) {
+        tables[tableId].state = "Ready to Start";
+    } else {
+        tables[tableId].state = "Waiting for Players";
+    }
+
+    // Notify all clients of the changes
     emitTableUpdate(tableId);
     emitLobbyUpdate();
 };
@@ -502,7 +534,7 @@ io.on("connection", (socket) => {
     });
 
     socket.on("resetGame", ({ tableId }) => {
-        resetTable(tableId, true);
+        resetTable(tableId);
     });
 });
 
