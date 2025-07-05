@@ -1,4 +1,4 @@
-// --- Backend/server.js (v7.0.0 - Alias & Audio Update) ---
+// --- Backend/server.js (v7.0.5 - Sound & Game Over Fix) ---
 require("dotenv").config();
 const http = require("http");
 const express = require("express");
@@ -15,7 +15,7 @@ const io = new Server(server, {
   cors: { origin: "*", methods: ["GET", "POST"] },
 });
 
-const SERVER_VERSION = "7.0.0 - Alias & Audio Update";
+const SERVER_VERSION = "7.0.5 - Sound & Game Over Fix";
 let pool;
 
 // --- MIDDLEWARE ---
@@ -123,7 +123,17 @@ const initializeNewRoundState = (table) => {
     table.playerOrderActive.forEach(pName => { if (pName && table.scores[pName] !== undefined) table.capturedTricks[pName] = []; });
 };
 
-// --- API ROUTES ---
+const authenticateToken = (req, res, next) => {
+    const authHeader = req.headers['authorization'];
+    const token = authHeader && authHeader.split(' ')[1];
+    if (token == null) return res.sendStatus(401);
+    jwt.verify(token, process.env.JWT_SECRET, (err, user) => {
+        if (err) return res.sendStatus(403);
+        req.user = user;
+        next();
+    });
+};
+
 app.post("/api/auth/register", async (req, res) => {
     const { username, email, password } = req.body;
     if (!username || !email || !password) return res.status(400).json({ message: "Username, email, and password are required." });
@@ -153,18 +163,6 @@ app.post("/api/auth/login", async (req, res) => {
         res.status(500).json({ message: "Server error during login." });
     }
 });
-
-const authenticateToken = (req, res, next) => {
-    const authHeader = req.headers['authorization'];
-    const token = authHeader && authHeader.split(' ')[1];
-    if (token == null) return res.sendStatus(401);
-    jwt.verify(token, process.env.JWT_SECRET, (err, user) => {
-        if (err) return res.sendStatus(403);
-        req.user = user;
-        next();
-    });
-};
-
 app.post("/api/user/change-username", authenticateToken, async (req, res) => {
     const { newUsername } = req.body;
     const userId = req.user.id;
@@ -177,9 +175,7 @@ app.post("/api/user/change-username", authenticateToken, async (req, res) => {
 
         for (const table of Object.values(tables)) {
             if(table.players[userId]) {
-                 const oldPlayerName = table.players[userId].playerName;
                  table.players[userId].playerName = newUsername.trim();
-                 // This does not update historical score keys, which is the desired behavior for in-progress games.
             }
         }
         
@@ -195,7 +191,6 @@ app.post("/api/user/change-username", authenticateToken, async (req, res) => {
     }
 });
 
-// --- SOCKET.IO MIDDLEWARE & CONNECTION ---
 io.use((socket, next) => {
     const token = socket.handshake.auth.token;
     if (!token) return next(new Error("Authentication error: No token provided."));
@@ -441,24 +436,23 @@ io.on("connection", (socket) => {
                 table.capturedTricks[winnerInfo.playerName].push(table.currentTrickCards.map(p => p.card));
             }
             
-            const isFinalTrick = table.tricksPlayedCount === 11;
-            table.state = "TrickCompleteLinger";
-            emitTableUpdate(tableId);
-
-            setTimeout(() => {
-                const currentTable = tables[tableId];
-                if (currentTable && currentTable.state === "TrickCompleteLinger") {
-                    if (isFinalTrick) {
-                        calculateRoundScores(tableId);
-                    } else {
+            if (table.tricksPlayedCount === 11) {
+                table.state = "AwaitingWidowRevealButton";
+                emitTableUpdate(tableId);
+            } else {
+                table.state = "TrickCompleteLinger";
+                emitTableUpdate(tableId);
+                setTimeout(() => {
+                    const currentTable = tables[tableId];
+                    if (currentTable && currentTable.state === "TrickCompleteLinger") {
                         currentTable.currentTrickCards = [];
                         currentTable.leadSuitCurrentTrick = null;
                         currentTable.trickTurnPlayerName = winnerInfo.playerName;
                         currentTable.state = "Playing Phase";
                         emitTableUpdate(tableId);
                     }
-                }
-            }, isFinalTrick ? 3000 : 1000);
+                }, 1000);
+            }
         } else {
             const currentTurnPlayerIndex = table.playerOrderActive.indexOf(username);
             table.trickTurnPlayerName = table.playerOrderActive[(currentTurnPlayerIndex + 1) % expectedCardsInTrick];
@@ -501,6 +495,12 @@ io.on("connection", (socket) => {
             console.log(`[${tableId}] INSURANCE DEAL EXECUTED!`);
         }
         emitTableUpdate(tableId);
+    });
+
+    socket.on("revealWidow", ({ tableId }) => {
+        if(tables[tableId] && tables[tableId].state === "AwaitingWidowRevealButton") {
+            calculateRoundScores(tableId);
+        }
     });
 
     socket.on("requestNextRound", ({ tableId }) => {
@@ -749,7 +749,7 @@ function calculateRoundScores(tableId) {
         if(pName !== PLACEHOLDER_ID) scoreDeltas[pName] = scores[pName] - (oldScores[pName] || 120); 
     });
     
-    let isGameOver = Object.values(scores).filter((s, k) => k !== PLACEHOLDER_ID).some(score => score <= 0);
+    let isGameOver = Object.values(scores).filter((s, k) => String(k) !== PLACEHOLDER_ID).some(score => score <= 0);
     let gameWinner = null;
     if(isGameOver) {
         const finalPlayerScores = Object.entries(scores).filter(([key]) => key !== PLACEHOLDER_ID);
@@ -764,16 +764,8 @@ function calculateRoundScores(tableId) {
         insuranceHindsight, scoreDeltas, allTricks: table.capturedTricks
     };
     
-    table.state = "WidowRevealPhase";
+    table.state = isGameOver ? "Game Over" : "Awaiting Next Round Trigger";
     emitTableUpdate(tableId);
-
-    setTimeout(() => {
-        const currentTable = tables[tableId];
-        if (currentTable && currentTable.state === "WidowRevealPhase") {
-            currentTable.state = isGameOver ? "Game Over" : "Awaiting Next Round Trigger";
-            emitTableUpdate(tableId);
-        }
-    }, 4000);
 }
 
 function prepareNextRound(tableId) {
@@ -802,7 +794,6 @@ function prepareNextRound(tableId) {
     table.state = "Dealing Pending";
     emitTableUpdate(tableId);
 }
-
 
 // --- SERVER STARTUP ---
 const PORT = process.env.PORT || 3000;
