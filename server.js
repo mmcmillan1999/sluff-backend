@@ -1,4 +1,4 @@
-// --- Backend/server.js (v7.1.2 - Linger State Removed) ---
+// --- Backend/server.js (v6.1.5 - Strategic Hindsight) ---
 require("dotenv").config();
 const http = require("http");
 const express = require("express");
@@ -15,8 +15,8 @@ const io = new Server(server, {
   cors: { origin: "*", methods: ["GET", "POST"] },
 });
 
-const SERVER_VERSION = "7.1.2 - Linger State Removed";
-let pool;
+const SERVER_VERSION = "6.1.5 - Strategic Hindsight";
+let pool; 
 
 // --- MIDDLEWARE ---
 app.use(cors({ origin: "*" }));
@@ -29,7 +29,6 @@ const CARD_POINT_VALUES = { "A": 11, "10": 10, "K": 4, "Q": 3, "J": 2, "9":0, "8
 const BID_HIERARCHY = ["Pass", "Frog", "Solo", "Heart Solo"];
 const BID_MULTIPLIERS = { "Frog": 1, "Solo": 2, "Heart Solo": 3 };
 const PLACEHOLDER_ID = "ScoreAbsorber";
-const TABLE_NAMES = { 1: "Fort Creek", 2: "ShireCliff Road", 3: "Table 3" };
 const NUM_TABLES = 3;
 
 // --- IN-MEMORY STATE ---
@@ -42,7 +41,7 @@ for (const suitKey in SUITS) {
 }
 
 // --- HELPER FUNCTIONS ---
-const getLobbyState = () => Object.fromEntries(Object.entries(tables).map(([tableId, table]) => { const allPlayers = Object.values(table.players); const activePlayers = allPlayers.filter(p => !p.isSpectator); return [tableId, { tableId: table.tableId, tableName: table.tableName, state: table.state, players: activePlayers.map(p => ({ userId: p.userId, playerName: p.playerName, disconnected: p.disconnected })), playerCount: activePlayers.length, spectatorCount: allPlayers.length - activePlayers.length, }]; }));
+const getLobbyState = () => Object.fromEntries(Object.entries(tables).map(([tableId, table]) => { const allPlayers = Object.values(table.players); const activePlayers = allPlayers.filter(p => !p.isSpectator); return [tableId, { tableId: table.tableId, state: table.state, players: activePlayers.map(p => ({ userId: p.userId, playerName: p.playerName, disconnected: p.disconnected })), playerCount: activePlayers.length, spectatorCount: allPlayers.length - activePlayers.length, }]; }));
 const emitLobbyUpdate = () => io.emit("lobbyState", getLobbyState());
 const emitTableUpdate = (tableId) => { if (tables[tableId]) io.to(tableId).emit("gameState", tables[tableId]); };
 const getPlayerNameByUserId = (userId, table) => table?.players[userId]?.playerName || String(userId);
@@ -53,9 +52,7 @@ const calculateCardPoints = (cardsArray) => { if (!cardsArray || cardsArray.leng
 const getInitialInsuranceState = () => ({ isActive: false, bidMultiplier: null, bidderPlayerName: null, bidderRequirement: 0, defenderOffers: {}, dealExecuted: false, executedDetails: null });
 
 const getInitialGameData = (tableId) => ({
-    tableId: tableId,
-    tableName: TABLE_NAMES[tableId.split('-')[1]],
-    state: "Waiting for Players", players: {}, playerOrderActive: [], dealer: null, hands: {},
+    tableId: tableId, state: "Waiting for Players", players: {}, playerOrderActive: [], dealer: null, hands: {},
     widow: [], originalDealtWidow: [], widowDiscardsForFrogBidder: [], scores: {}, bidsThisRound: [],
     currentHighestBidDetails: null, biddingTurnPlayerName: null, bidsMadeCount: 0, originalFrogBidderId: null,
     soloBidMadeAfterFrog: false, trumpSuit: null, bidWinnerInfo: null, gameStarted: false, currentTrickCards: [],
@@ -89,24 +86,45 @@ const resetTable = (tableId) => {
     if (!tables[tableId]) return;
     const originalPlayers = { ...tables[tableId].players };
     
+    // Reset the table to its initial data structure
     tables[tableId] = getInitialGameData(tableId);
 
     const activePlayerNames = [];
     
+    // Re-add the players from the original table
     for (const userId in originalPlayers) {
         const playerInfo = originalPlayers[userId];
-        tables[tableId].players[userId] = { ...playerInfo, isSpectator: false, disconnected: playerInfo.disconnected };
+        
+        // Add player back, ensuring they are NOT a spectator
+        tables[tableId].players[userId] = { 
+            ...playerInfo, 
+            isSpectator: false, 
+            disconnected: playerInfo.disconnected 
+        };
+
+        // Explicitly reset the player's score to 120
         tables[tableId].scores[playerInfo.playerName] = 120;
-        if (!playerInfo.isSpectator) activePlayerNames.push(playerInfo.playerName);
+
+        // If they were an active player before, add them to the new active list
+        if (!playerInfo.isSpectator) {
+            activePlayerNames.push(playerInfo.playerName);
+        }
     }
 
+    // Restore the active player order
     tables[tableId].playerOrderActive = activePlayerNames;
-    tables[tableId].gameStarted = true;
+    tables[tableId].gameStarted = true; // Keep the game in a "started" state so new players can't join seats
     tables[tableId].playerMode = activePlayerNames.length;
 
-    if (activePlayerNames.length >= 3) tables[tableId].state = "Ready to Start";
-    else tables[tableId].state = "Waiting for Players";
 
+    // Update the table state based on the number of active players
+    if (activePlayerNames.length >= 3) {
+        tables[tableId].state = "Ready to Start";
+    } else {
+        tables[tableId].state = "Waiting for Players";
+    }
+
+    // Notify all clients of the changes
     emitTableUpdate(tableId);
     emitLobbyUpdate();
 };
@@ -123,86 +141,58 @@ const initializeNewRoundState = (table) => {
     table.playerOrderActive.forEach(pName => { if (pName && table.scores[pName] !== undefined) table.capturedTricks[pName] = []; });
 };
 
-const authenticateToken = (req, res, next) => {
-    const authHeader = req.headers['authorization'];
-    const token = authHeader && authHeader.split(' ')[1];
-    if (token == null) return res.sendStatus(401);
-    jwt.verify(token, process.env.JWT_SECRET, (err, user) => {
-        if (err) return res.sendStatus(403);
-        req.user = user;
-        next();
-    });
-};
 
+// --- API ROUTES for AUTHENTICATION ---
 app.post("/api/auth/register", async (req, res) => {
     const { username, email, password } = req.body;
-    if (!username || !email || !password) return res.status(400).json({ message: "Username, email, and password are required." });
+    if (!username || !email || !password) {
+        return res.status(400).json({ message: "Username, email, and password are required." });
+    }
     try {
         const salt = await bcrypt.genSalt(10);
         const passwordHash = await bcrypt.hash(password, salt);
-        const result = await pool.query(`INSERT INTO users (username, email, password_hash) VALUES ($1, $2, $3) RETURNING id, username, email;`, [username, email, passwordHash]);
+        const newUserQuery = `INSERT INTO users (username, email, password_hash) VALUES ($1, $2, $3) RETURNING id, username, email;`;
+        const result = await pool.query(newUserQuery, [username, email, passwordHash]);
         res.status(201).json({ message: "User created successfully", user: result.rows[0] });
     } catch (err) {
-        if (err.code === '23505') return res.status(409).json({ message: "Username or email already exists." });
+        if (err.code === '23505') { return res.status(409).json({ message: "Username or email already exists." }); }
+        console.error("Error during registration:", err);
         res.status(500).json({ message: "Server error during registration." });
     }
 });
-
 app.post("/api/auth/login", async (req, res) => {
     const { email, password } = req.body;
-    if (!email || !password) return res.status(400).json({ message: "Email and password are required." });
+    if (!email || !password) {
+        return res.status(400).json({ message: "Email and password are required." });
+    }
     try {
-        const result = await pool.query("SELECT * FROM users WHERE email = $1", [email]);
+        const userQuery = "SELECT * FROM users WHERE email = $1";
+        const result = await pool.query(userQuery, [email]);
         const user = result.rows[0];
-        if (!user) return res.status(401).json({ message: "Invalid credentials." });
+        if (!user) { return res.status(401).json({ message: "Invalid credentials." }); }
         const isMatch = await bcrypt.compare(password, user.password_hash);
-        if (!isMatch) return res.status(401).json({ message: "Invalid credentials." });
+        if (!isMatch) { return res.status(401).json({ message: "Invalid credentials." }); }
         const payload = { id: user.id, username: user.username };
         const token = jwt.sign(payload, process.env.JWT_SECRET, { expiresIn: '1d' });
-        res.json({ message: "Logged in successfully", token, user: payload });
+        res.json({ message: "Logged in successfully", token: token, user: payload });
     } catch (err) {
+        console.error("Error during login:", err);
         res.status(500).json({ message: "Server error during login." });
     }
 });
 
-app.post("/api/user/change-username", authenticateToken, async (req, res) => {
-    const { newUsername } = req.body;
-    const userId = req.user.id;
-    if (!newUsername || newUsername.trim().length < 3) return res.status(400).json({ message: "Username must be at least 3 characters." });
-    try {
-        const existingUser = await pool.query("SELECT id FROM users WHERE username = $1", [newUsername.trim()]);
-        if (existingUser.rows.length > 0) return res.status(409).json({ message: "Username is already taken." });
-        
-        await pool.query("UPDATE users SET username = $1 WHERE id = $2", [newUsername.trim(), userId]);
-
-        for (const table of Object.values(tables)) {
-            if(table.players[userId]) {
-                 table.players[userId].playerName = newUsername.trim();
-            }
-        }
-        
-        const payload = { id: userId, username: newUsername.trim() };
-        const token = jwt.sign(payload, process.env.JWT_SECRET, { expiresIn: '1d' });
-
-        emitLobbyUpdate();
-        Object.keys(tables).forEach(emitTableUpdate);
-
-        res.json({ message: "Username updated successfully", token, user: payload });
-    } catch (err) {
-        res.status(500).json({ message: "Server error while changing username." });
-    }
-});
-
+// --- SOCKET.IO AUTHENTICATION MIDDLEWARE ---
 io.use((socket, next) => {
     const token = socket.handshake.auth.token;
-    if (!token) return next(new Error("Authentication error: No token provided."));
+    if (!token) { return next(new Error("Authentication error: No token provided.")); }
     jwt.verify(token, process.env.JWT_SECRET, (err, user) => {
-        if (err) return next(new Error("Authentication error: Invalid token."));
+        if (err) { return next(new Error("Authentication error: Invalid token.")); }
         socket.user = user;
         next();
     });
 });
 
+// --- MAIN SOCKET.IO CONNECTION HANDLER ---
 io.on("connection", (socket) => {
     console.log(`Socket connected for user: ${socket.user.username} (ID: ${socket.user.id})`);
     
@@ -210,6 +200,7 @@ io.on("connection", (socket) => {
 
     for (const table of Object.values(tables)) {
         if (table.players[socket.userId]?.disconnected) {
+            console.log(`Reconnecting user ${socket.user.username} to table ${table.tableId}`);
             table.players[socket.userId].disconnected = false;
             table.players[socket.userId].socketId = socket.id;
             socket.join(table.tableId);
@@ -402,30 +393,35 @@ io.on("connection", (socket) => {
 
     socket.on("playCard", ({ tableId, card }) => {
         const table = tables[tableId];
-        if (!table || table.state !== "Playing Phase" || socket.user.username !== table.trickTurnPlayerName) return;
+        if (!table) return;
         const { username, id } = socket.user;
+        
+        if (table.state !== "Playing Phase" || username !== table.trickTurnPlayerName) return;
         const hand = table.hands[username];
         if (!hand || !hand.includes(card)) return;
 
         const isLeading = table.currentTrickCards.length === 0;
         const playedSuit = getSuit(card);
-        const leadSuit = table.leadSuitCurrentTrick;
-        
+
         if (isLeading) {
-            const isHandAllTrump = hand.every(c => getSuit(c) === table.trumpSuit);
-            if (playedSuit === table.trumpSuit && !table.trumpBroken && !isHandAllTrump) return socket.emit("error", "Cannot lead trump until it is broken.");
+            if (playedSuit === table.trumpSuit && !table.trumpBroken) {
+                const isHandAllTrump = hand.every(c => getSuit(c) === table.trumpSuit);
+                if (!isHandAllTrump) return socket.emit("error", "Cannot lead trump until it is broken.");
+            }
         } else {
-            const hasLeadSuit = hand.some(c => getSuit(c) === leadSuit);
-            if (hasLeadSuit && playedSuit !== leadSuit) return socket.emit("error", `Must follow suit (${SUITS[leadSuit]}).`);
-            const hasTrump = hand.some(c => getSuit(c) === table.trumpSuit);
-            if (!hasLeadSuit && hasTrump && playedSuit !== table.trumpSuit) return socket.emit("error", "You must play trump if you cannot follow suit.");
+            const leadCardSuit = table.leadSuitCurrentTrick;
+            const hasLeadSuit = hand.some(c => getSuit(c) === leadCardSuit);
+            if (playedSuit !== leadCardSuit && hasLeadSuit) return socket.emit("error", `Must follow suit (${SUITS[leadCardSuit]}).`);
+            if (!hasLeadSuit) {
+                const hasTrump = hand.some(c => getSuit(c) === table.trumpSuit);
+                if (hasTrump && playedSuit !== table.trumpSuit) return socket.emit("error", "You must play trump if you cannot follow suit.");
+            }
         }
 
-        if (playedSuit === table.trumpSuit && !table.trumpBroken) table.trumpBroken = true;
-        
         table.hands[username] = hand.filter(c => c !== card);
         table.currentTrickCards.push({ userId: id, playerName: username, card });
         if (isLeading) table.leadSuitCurrentTrick = playedSuit;
+        if (playedSuit === table.trumpSuit) table.trumpBroken = true;
 
         const expectedCardsInTrick = table.playerOrderActive.length;
         if (table.currentTrickCards.length === expectedCardsInTrick) {
@@ -433,6 +429,7 @@ io.on("connection", (socket) => {
             table.lastCompletedTrick = { cards: [...table.currentTrickCards], winnerName: winnerInfo.playerName };
             table.tricksPlayedCount++;
             table.trickLeaderName = winnerInfo.playerName;
+
             if (winnerInfo.playerName) {
                 if (!table.capturedTricks[winnerInfo.playerName]) table.capturedTricks[winnerInfo.playerName] = [];
                 table.capturedTricks[winnerInfo.playerName].push(table.currentTrickCards.map(p => p.card));
@@ -441,11 +438,18 @@ io.on("connection", (socket) => {
             if (table.tricksPlayedCount === 11) {
                 calculateRoundScores(tableId);
             } else {
-                table.currentTrickCards = [];
-                table.leadSuitCurrentTrick = null;
-                table.trickTurnPlayerName = winnerInfo.playerName;
-                table.state = "Playing Phase";
+                table.state = "TrickCompleteLinger";
                 emitTableUpdate(tableId);
+                setTimeout(() => {
+                    const currentTable = tables[tableId];
+                    if (currentTable && currentTable.state === "TrickCompleteLinger") {
+                        currentTable.currentTrickCards = [];
+                        currentTable.leadSuitCurrentTrick = null;
+                        currentTable.trickTurnPlayerName = winnerInfo.playerName;
+                        currentTable.state = "Playing Phase";
+                        emitTableUpdate(tableId);
+                    }
+                }, 1000);
             }
         } else {
             const currentTurnPlayerIndex = table.playerOrderActive.indexOf(username);
@@ -535,6 +539,7 @@ io.on("connection", (socket) => {
 });
 
 // --- CORE GAME LOGIC FUNCTIONS ---
+
 function transitionToPlayingPhase(table) {
     table.state = "Playing Phase";
     table.tricksPlayedCount = 0;
@@ -632,52 +637,71 @@ function calculateRoundScores(tableId) {
     if (!table || !table.bidWinnerInfo) return;
 
     const { bidWinnerInfo, playerOrderActive, playerMode, scores, capturedTricks, widowDiscardsForFrogBidder, originalDealtWidow, insurance } = table;
-    const oldScores = {...scores};
     const bidWinnerName = bidWinnerInfo.playerName;
     const bidType = bidWinnerInfo.bid;
     const currentBidMultiplier = BID_MULTIPLIERS[bidType];
     
     let bidderTotalCardPoints = 0;
+    let defendersTotalCardPoints = 0;
+
     playerOrderActive.forEach(pName => {
-        const playerTrickPoints = calculateCardPoints((capturedTricks[pName] || []).flat());
-        if (pName === bidWinnerName) bidderTotalCardPoints += playerTrickPoints;
+        const capturedCards = (capturedTricks[pName] || []).flat();
+        const playerTrickPoints = calculateCardPoints(capturedCards);
+        if (pName === bidWinnerName) {
+            bidderTotalCardPoints += playerTrickPoints;
+        } else {
+            defendersTotalCardPoints += playerTrickPoints;
+        }
     });
     
+    let widowPoints = 0;
     let widowForReveal = [...originalDealtWidow];
     if (bidType === "Frog") {
-        bidderTotalCardPoints += calculateCardPoints(widowDiscardsForFrogBidder);
+        widowPoints = calculateCardPoints(widowDiscardsForFrogBidder);
         widowForReveal = [...widowDiscardsForFrogBidder];
+        bidderTotalCardPoints += widowPoints;
     } else if (bidType === "Solo") {
-        bidderTotalCardPoints += calculateCardPoints(originalDealtWidow);
-    } else if (bidType === "Heart Solo" && table.trickLeaderName === bidWinnerName) {
-        bidderTotalCardPoints += calculateCardPoints(originalDealtWidow);
+        widowPoints = calculateCardPoints(originalDealtWidow);
+        bidderTotalCardPoints += widowPoints;
+    } else if (bidType === "Heart Solo") {
+        widowPoints = calculateCardPoints(originalDealtWidow);
+        if (table.trickLeaderName === bidWinnerName) {
+            bidderTotalCardPoints += widowPoints;
+        } else {
+            defendersTotalCardPoints += widowPoints;
+        }
     }
 
     let roundMessage = "";
+    let insuranceHindsight = null;
+
     if (insurance.dealExecuted) {
         const agreement = insurance.executedDetails.agreement;
         scores[agreement.bidderPlayerName] += agreement.bidderRequirement;
-        for (const defenderName in agreement.defenderOffers) scores[defenderName] -= agreement.defenderOffers[defenderName];
-        roundMessage = `Insurance deal executed.`;
+        for (const defenderName in agreement.defenderOffers) {
+            scores[defenderName] -= agreement.defenderOffers[defenderName];
+        }
+        roundMessage = `Insurance deal executed. Points exchanged based on agreement.`;
     } else {
         const scoreDifferenceFrom60 = bidderTotalCardPoints - 60;
         const exchangeValue = Math.abs(scoreDifferenceFrom60) * currentBidMultiplier;
-        if (scoreDifferenceFrom60 > 0) {
+        if (scoreDifferenceFrom60 === 0) { roundMessage = `${bidWinnerName} scored exactly 60. No points exchanged.`; } 
+        else if (bidderTotalCardPoints > 60) {
             let totalPointsGained = 0;
             playerOrderActive.forEach(pName => { if (pName !== bidWinnerName) { scores[pName] -= exchangeValue; totalPointsGained += exchangeValue; } });
             scores[bidWinnerName] += totalPointsGained;
-            roundMessage = `${bidWinnerName} succeeded!`;
-        } else if (scoreDifferenceFrom60 < 0) {
+            roundMessage = `${bidWinnerName} succeeded! Gains ${totalPointsGained} points.`;
+        } else {
             let totalPointsLost = 0;
-            const opponents = playerOrderActive.filter(pName => pName !== bidWinnerName);
-            opponents.forEach(oppName => { scores[oppName] += exchangeValue; totalPointsLost += exchangeValue; });
+            const activeOpponents = playerOrderActive.filter(pName => pName !== bidWinnerName);
+            activeOpponents.forEach(oppName => { scores[oppName] += exchangeValue; totalPointsLost += exchangeValue; });
             if (playerMode === 3) { scores[PLACEHOLDER_ID] += exchangeValue; totalPointsLost += exchangeValue; }
+            else if (playerMode === 4) { const dealerName = getPlayerNameByUserId(table.dealer, table); if (dealerName && !playerOrderActive.includes(dealerName)) { scores[dealerName] += exchangeValue; totalPointsLost += exchangeValue; } }
             scores[bidWinnerName] -= totalPointsLost;
-            roundMessage = `${bidWinnerName} failed.`;
-        } else { roundMessage = `${bidWinnerName} scored exactly 60. No points exchanged.`; }
+            roundMessage = `${bidWinnerName} failed. Loses ${totalPointsLost} points.`;
+        }
     }
     
-    let insuranceHindsight = null;
     if (playerMode === 3) {
         insuranceHindsight = {};
         const defenders = playerOrderActive.filter(p => p !== bidWinnerName);
@@ -732,25 +756,31 @@ function calculateRoundScores(tableId) {
         });
     }
 
-    const scoreDeltas = {};
-    Object.keys(scores).forEach(pName => { 
-        if(pName !== PLACEHOLDER_ID) scoreDeltas[pName] = scores[pName] - (oldScores[pName] || 120); 
-    });
-    
-    const finalPlayerScores = Object.entries(scores).filter(([key]) => key !== PLACEHOLDER_ID);
-    let isGameOver = finalPlayerScores.some(([, score]) => score <= 0);
-
+    let isGameOver = false;
     let gameWinner = null;
-    if(isGameOver) {
-        if (finalPlayerScores.length > 0) gameWinner = finalPlayerScores.sort((a,b) => b[1] - a[1])[0][0];
+    if(Object.values(scores).filter(s => typeof s === 'number').some(score => score <= 0)) {
+        isGameOver = true;
+        const finalPlayerScores = Object.entries(scores).filter(([key]) => key !== PLACEHOLDER_ID);
+        if (finalPlayerScores.length > 0) {
+            gameWinner = finalPlayerScores.sort((a,b) => b[1] - a[1])[0][0];
+        }
         roundMessage += ` GAME OVER! Winner: ${gameWinner}.`;
     }
 
     table.roundSummary = {
-        message, bidWinnerName, finalScores: { ...scores }, isGameOver, gameWinner,
-        dealerOfRoundId: table.dealer, widowForReveal, insuranceDealWasMade: insurance.dealExecuted,
-        insuranceDetails: insurance.dealExecuted ? insurance.executedDetails.agreement : null,
-        insuranceHindsight, scoreDeltas, allTricks: table.capturedTricks
+        message: roundMessage,
+        bidWinnerName,
+        bidderCardPoints: bidderTotalCardPoints,
+        defenderCardPoints: defendersTotalCardPoints,
+        finalScores: { ...scores },
+        isGameOver,
+        gameWinner,
+        dealerOfRoundId: table.dealer,
+        widowForReveal,
+        insuranceDealWasMade: insurance.dealExecuted,
+        insuranceDetails: insurance.dealExecuted ? insurance.executedDetails : null,
+        insuranceHindsight: insuranceHindsight,
+        allTricks: table.capturedTricks
     };
     
     table.state = isGameOver ? "Game Over" : "Awaiting Next Round Trigger";
@@ -762,10 +792,7 @@ function prepareNextRound(tableId) {
     if (!table || !table.gameStarted) return;
 
     const allPlayerIds = Object.keys(table.players).filter(pId => !table.players[pId].isSpectator && !table.players[pId].disconnected).map(Number);
-    if (allPlayerIds.length < 3) {
-        resetTable(tableId);
-        return;
-    };
+    if (allPlayerIds.length < 3) return resetTable(tableId, true);
     
     const lastDealerId = table.dealer;
     const lastDealerIndex = allPlayerIds.indexOf(lastDealerId);
@@ -787,12 +814,16 @@ function prepareNextRound(tableId) {
     emitTableUpdate(tableId);
 }
 
+
 // --- SERVER STARTUP ---
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, async () => {
   console.log(`Sluff Game Server (${SERVER_VERSION}) running on port ${PORT}`);
   try {
-    pool = new Pool({ connectionString: process.env.DATABASE_URL, ssl: { rejectUnauthorized: false } });
+    pool = new Pool({
+      connectionString: process.env.DATABASE_URL,
+      ssl: { rejectUnauthorized: false }
+    });
     await pool.connect();
     console.log("✅ Database connection successful.");
     await createDbTables(pool);
