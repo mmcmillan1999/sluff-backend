@@ -174,9 +174,7 @@ app.post("/api/user/change-username", authenticateToken, async (req, res) => {
         await pool.query("UPDATE users SET username = $1 WHERE id = $2", [newUsername.trim(), userId]);
 
         for (const table of Object.values(tables)) {
-            if(table.players[userId]) {
-                 table.players[userId].playerName = newUsername.trim();
-            }
+            if(table.players[userId]) table.players[userId].playerName = newUsername.trim();
         }
         
         const payload = { id: userId, username: newUsername.trim() };
