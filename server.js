@@ -1,4 +1,4 @@
-// --- Backend/server.js (v7.0.6 - Final Flow & Sound Fix) ---
+// --- Backend/server.js (v7.1.0 - Stable Flow Revert) ---
 require("dotenv").config();
 const http = require("http");
 const express = require("express");
@@ -15,7 +15,7 @@ const io = new Server(server, {
   cors: { origin: "*", methods: ["GET", "POST"] },
 });
 
-const SERVER_VERSION = "7.0.6 - Final Flow & Sound Fix";
+const SERVER_VERSION = "7.1.0 - Stable Flow Revert";
 let pool;
 
 // --- MIDDLEWARE ---
@@ -147,7 +147,6 @@ app.post("/api/auth/register", async (req, res) => {
         res.status(500).json({ message: "Server error during registration." });
     }
 });
-
 app.post("/api/auth/login", async (req, res) => {
     const { email, password } = req.body;
     if (!email || !password) return res.status(400).json({ message: "Email and password are required." });
@@ -164,7 +163,6 @@ app.post("/api/auth/login", async (req, res) => {
         res.status(500).json({ message: "Server error during login." });
     }
 });
-
 app.post("/api/user/change-username", authenticateToken, async (req, res) => {
     const { newUsername } = req.body;
     const userId = req.user.id;
@@ -438,23 +436,24 @@ io.on("connection", (socket) => {
                 table.capturedTricks[winnerInfo.playerName].push(table.currentTrickCards.map(p => p.card));
             }
             
-            if (table.tricksPlayedCount === 11) {
-                table.state = "AwaitingWidowRevealButton";
-                emitTableUpdate(tableId);
-            } else {
-                table.state = "TrickCompleteLinger";
-                emitTableUpdate(tableId);
-                setTimeout(() => {
-                    const currentTable = tables[tableId];
-                    if (currentTable && currentTable.state === "TrickCompleteLinger") {
+            const isFinalTrick = table.tricksPlayedCount === 11;
+            table.state = "TrickCompleteLinger";
+            emitTableUpdate(tableId);
+
+            setTimeout(() => {
+                const currentTable = tables[tableId];
+                if (currentTable && currentTable.state === "TrickCompleteLinger") {
+                    if (isFinalTrick) {
+                        calculateRoundScores(tableId);
+                    } else {
                         currentTable.currentTrickCards = [];
                         currentTable.leadSuitCurrentTrick = null;
                         currentTable.trickTurnPlayerName = winnerInfo.playerName;
                         currentTable.state = "Playing Phase";
                         emitTableUpdate(tableId);
                     }
-                }, 1000);
-            }
+                }
+            }, isFinalTrick ? 3000 : 1000);
         } else {
             const currentTurnPlayerIndex = table.playerOrderActive.indexOf(username);
             table.trickTurnPlayerName = table.playerOrderActive[(currentTurnPlayerIndex + 1) % expectedCardsInTrick];
@@ -497,12 +496,6 @@ io.on("connection", (socket) => {
             console.log(`[${tableId}] INSURANCE DEAL EXECUTED!`);
         }
         emitTableUpdate(tableId);
-    });
-
-    socket.on("revealWidow", ({ tableId }) => {
-        if(tables[tableId] && tables[tableId].state === "AwaitingWidowRevealButton") {
-            calculateRoundScores(tableId);
-        }
     });
 
     socket.on("requestNextRound", ({ tableId }) => {
