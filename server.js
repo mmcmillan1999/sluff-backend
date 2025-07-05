@@ -1,4 +1,4 @@
-// --- Backend/server.js (v7.1.0 - Stable Flow Revert) ---
+// --- Backend/server.js (v7.1.1 - Linger & All-Pass Fix) ---
 require("dotenv").config();
 const http = require("http");
 const express = require("express");
@@ -15,7 +15,7 @@ const io = new Server(server, {
   cors: { origin: "*", methods: ["GET", "POST"] },
 });
 
-const SERVER_VERSION = "7.1.0 - Stable Flow Revert";
+const SERVER_VERSION = "7.1.1 - Linger & All-Pass Fix";
 let pool;
 
 // --- MIDDLEWARE ---
@@ -436,6 +436,7 @@ io.on("connection", (socket) => {
                 table.capturedTricks[winnerInfo.playerName].push(table.currentTrickCards.map(p => p.card));
             }
             
+            // Reverted Logic: No button, just a timed delay.
             const isFinalTrick = table.tricksPlayedCount === 11;
             table.state = "TrickCompleteLinger";
             emitTableUpdate(tableId);
@@ -453,7 +454,7 @@ io.on("connection", (socket) => {
                         emitTableUpdate(tableId);
                     }
                 }
-            }, isFinalTrick ? 3000 : 1000);
+            }, isFinalTrick ? 3000 : 1000); // 3 second linger for final trick, 1 sec otherwise
         } else {
             const currentTurnPlayerIndex = table.playerOrderActive.indexOf(username);
             table.trickTurnPlayerName = table.playerOrderActive[(currentTurnPlayerIndex + 1) % expectedCardsInTrick];
@@ -768,8 +769,12 @@ function prepareNextRound(tableId) {
     const table = tables[tableId];
     if (!table || !table.gameStarted) return;
 
-    const allPlayerIds = Object.keys(table.players).filter(pId => !p.isSpectator && !p.players[pId].disconnected).map(Number);
-    if (allPlayerIds.length < 3) return resetTable(tableId);
+    // CORRECTED TYPO HERE
+    const allPlayerIds = Object.keys(table.players).filter(pId => !table.players[pId].isSpectator && !table.players[pId].disconnected).map(Number);
+    if (allPlayerIds.length < 3) {
+        resetTable(tableId);
+        return;
+    };
     
     const lastDealerId = table.dealer;
     const lastDealerIndex = allPlayerIds.indexOf(lastDealerId);
