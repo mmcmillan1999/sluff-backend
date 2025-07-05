@@ -1,4 +1,4 @@
-// --- Backend/server.js (v7.0.5 - Sound & Game Over Fix) ---
+// --- Backend/server.js (v7.0.6 - Final Flow & Sound Fix) ---
 require("dotenv").config();
 const http = require("http");
 const express = require("express");
@@ -15,7 +15,7 @@ const io = new Server(server, {
   cors: { origin: "*", methods: ["GET", "POST"] },
 });
 
-const SERVER_VERSION = "7.0.5 - Sound & Game Over Fix";
+const SERVER_VERSION = "7.0.6 - Final Flow & Sound Fix";
 let pool;
 
 // --- MIDDLEWARE ---
@@ -147,6 +147,7 @@ app.post("/api/auth/register", async (req, res) => {
         res.status(500).json({ message: "Server error during registration." });
     }
 });
+
 app.post("/api/auth/login", async (req, res) => {
     const { email, password } = req.body;
     if (!email || !password) return res.status(400).json({ message: "Email and password are required." });
@@ -163,6 +164,7 @@ app.post("/api/auth/login", async (req, res) => {
         res.status(500).json({ message: "Server error during login." });
     }
 });
+
 app.post("/api/user/change-username", authenticateToken, async (req, res) => {
     const { newUsername } = req.body;
     const userId = req.user.id;
@@ -749,10 +751,11 @@ function calculateRoundScores(tableId) {
         if(pName !== PLACEHOLDER_ID) scoreDeltas[pName] = scores[pName] - (oldScores[pName] || 120); 
     });
     
-    let isGameOver = Object.values(scores).filter((s, k) => String(k) !== PLACEHOLDER_ID).some(score => score <= 0);
+    const finalPlayerScores = Object.entries(scores).filter(([key]) => key !== PLACEHOLDER_ID);
+    let isGameOver = finalPlayerScores.some(([, score]) => score <= 0);
+
     let gameWinner = null;
     if(isGameOver) {
-        const finalPlayerScores = Object.entries(scores).filter(([key]) => key !== PLACEHOLDER_ID);
         if (finalPlayerScores.length > 0) gameWinner = finalPlayerScores.sort((a,b) => b[1] - a[1])[0][0];
         roundMessage += ` GAME OVER! Winner: ${gameWinner}.`;
     }
