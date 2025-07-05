@@ -1,4 +1,4 @@
-// --- Backend/server.js (v6.1.4 - Hindsight Update) ---
+// --- Backend/server.js (v6.1.5 - Strategic Hindsight) ---
 require("dotenv").config();
 const http = require("http");
 const express = require("express");
@@ -15,7 +15,7 @@ const io = new Server(server, {
   cors: { origin: "*", methods: ["GET", "POST"] },
 });
 
-const SERVER_VERSION = "6.1.4 - Hindsight Update";
+const SERVER_VERSION = "6.1.5 - Strategic Hindsight";
 let pool; 
 
 // --- MIDDLEWARE ---
@@ -654,9 +654,8 @@ function calculateRoundScores(tableId) {
         }
     });
     
-    // Determine which cards to count from the "widow" pile
     let widowPoints = 0;
-    let widowForReveal = [...originalDealtWidow]; // Default to original widow
+    let widowForReveal = [...originalDealtWidow];
     if (bidType === "Frog") {
         widowPoints = calculateCardPoints(widowDiscardsForFrogBidder);
         widowForReveal = [...widowDiscardsForFrogBidder];
@@ -676,7 +675,6 @@ function calculateRoundScores(tableId) {
     let roundMessage = "";
     let insuranceHindsight = null;
 
-    // This block handles the actual score changes for the round
     if (insurance.dealExecuted) {
         const agreement = insurance.executedDetails.agreement;
         scores[agreement.bidderPlayerName] += agreement.bidderRequirement;
@@ -704,7 +702,6 @@ function calculateRoundScores(tableId) {
         }
     }
     
-    // This block calculates the hindsight data without changing scores
     if (playerMode === 3) {
         insuranceHindsight = {};
         const defenders = playerOrderActive.filter(p => p !== bidWinnerName);
@@ -716,22 +713,38 @@ function calculateRoundScores(tableId) {
             outcomeFromCards[bidWinnerName] = exchangeValue * 2;
             defenders.forEach(def => outcomeFromCards[def] = -exchangeValue);
         } else if (scoreDifferenceFrom60 < 0) {
-            outcomeFromCards[bidWinnerName] = -(exchangeValue * 2); // Bidder loses double what defenders gain
+            outcomeFromCards[bidWinnerName] = -(exchangeValue * 2);
             defenders.forEach(def => outcomeFromCards[def] = exchangeValue);
         } else {
              playerOrderActive.forEach(p => outcomeFromCards[p] = 0);
         }
 
-        const outcomeFromDeal = {};
-        const agreement = insurance.dealExecuted ? insurance.executedDetails.agreement : { bidderPlayerName: insurance.bidderPlayerName, bidderRequirement: insurance.bidderRequirement, defenderOffers: insurance.defenderOffers };
-        outcomeFromDeal[agreement.bidderPlayerName] = agreement.bidderRequirement;
-        for (const defName in agreement.defenderOffers) {
-             outcomeFromDeal[defName] = -agreement.defenderOffers[defName];
+        const potentialOutcomeFromDeal = {};
+        const sumOfFinalOffers = Object.values(insurance.defenderOffers).reduce((sum, offer) => sum + offer, 0);
+        potentialOutcomeFromDeal[bidWinnerName] = sumOfFinalOffers;
+        const costPerDefenderForced = Math.round(insurance.bidderRequirement / defenders.length);
+        defenders.forEach(def => {
+            potentialOutcomeFromDeal[def] = -costPerDefenderForced;
+        });
+
+        const actualOutcomeFromDeal = {};
+        if (insurance.dealExecuted) {
+            const agreement = insurance.executedDetails.agreement;
+            actualOutcomeFromDeal[agreement.bidderPlayerName] = agreement.bidderRequirement;
+            for (const defName in agreement.defenderOffers) {
+                actualOutcomeFromDeal[defName] = -agreement.defenderOffers[defName];
+           }
         }
 
         playerOrderActive.forEach(pName => {
-            const actualPoints = insurance.dealExecuted ? outcomeFromDeal[pName] : outcomeFromCards[pName];
-            const potentialPoints = insurance.dealExecuted ? outcomeFromCards[pName] : outcomeFromDeal[pName];
+            let actualPoints, potentialPoints;
+            if (insurance.dealExecuted) {
+                actualPoints = actualOutcomeFromDeal[pName];
+                potentialPoints = outcomeFromCards[pName];
+            } else {
+                actualPoints = outcomeFromCards[pName];
+                potentialPoints = potentialOutcomeFromDeal[pName];
+            }
             
             insuranceHindsight[pName] = {
                 actualPoints: actualPoints || 0,
