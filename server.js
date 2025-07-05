@@ -772,7 +772,7 @@ function prepareNextRound(tableId) {
     const table = tables[tableId];
     if (!table || !table.gameStarted) return;
 
-    const allPlayerIds = Object.keys(table.players).filter(pId => !table.players[pId].isSpectator && !table.players[pId].disconnected).map(Number);
+    const allPlayerIds = Object.keys(table.players).filter(pId => !p.isSpectator && !p.players[pId].disconnected).map(Number);
     if (allPlayerIds.length < 3) return resetTable(tableId);
     
     const lastDealerId = table.dealer;
