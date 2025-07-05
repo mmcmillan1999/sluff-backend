@@ -1,4 +1,4 @@
-// --- Backend/server.js (v6.1.3 - Reset Logic Fix) ---
+// --- Backend/server.js (v6.1.4 - Hindsight Update) ---
 require("dotenv").config();
 const http = require("http");
 const express = require("express");
@@ -15,7 +15,7 @@ const io = new Server(server, {
   cors: { origin: "*", methods: ["GET", "POST"] },
 });
 
-const SERVER_VERSION = "6.1.3 - Reset Logic Fix";
+const SERVER_VERSION = "6.1.4 - Hindsight Update";
 let pool; 
 
 // --- MIDDLEWARE ---
@@ -659,7 +659,7 @@ function calculateRoundScores(tableId) {
     let widowForReveal = [...originalDealtWidow]; // Default to original widow
     if (bidType === "Frog") {
         widowPoints = calculateCardPoints(widowDiscardsForFrogBidder);
-        widowForReveal = [...widowDiscardsForFrogBidder]; // UPDATE: Show discarded cards for Frog
+        widowForReveal = [...widowDiscardsForFrogBidder];
         bidderTotalCardPoints += widowPoints;
     } else if (bidType === "Solo") {
         widowPoints = calculateCardPoints(originalDealtWidow);
@@ -676,6 +676,7 @@ function calculateRoundScores(tableId) {
     let roundMessage = "";
     let insuranceHindsight = null;
 
+    // This block handles the actual score changes for the round
     if (insurance.dealExecuted) {
         const agreement = insurance.executedDetails.agreement;
         scores[agreement.bidderPlayerName] += agreement.bidderRequirement;
@@ -703,55 +704,42 @@ function calculateRoundScores(tableId) {
         }
     }
     
+    // This block calculates the hindsight data without changing scores
     if (playerMode === 3) {
         insuranceHindsight = {};
         const defenders = playerOrderActive.filter(p => p !== bidWinnerName);
         
-        // Calculate what ACTUALLY happened
-        const actualChange = {};
-        if (insurance.dealExecuted) {
-            const agreement = insurance.executedDetails.agreement;
-            actualChange[bidWinnerName] = agreement.bidderRequirement;
-            defenders.forEach(def => actualChange[def] = -agreement.defenderOffers[def]);
+        const outcomeFromCards = {};
+        const scoreDifferenceFrom60 = bidderTotalCardPoints - 60;
+        const exchangeValue = Math.abs(scoreDifferenceFrom60) * currentBidMultiplier;
+        if (scoreDifferenceFrom60 > 0) {
+            outcomeFromCards[bidWinnerName] = exchangeValue * 2;
+            defenders.forEach(def => outcomeFromCards[def] = -exchangeValue);
+        } else if (scoreDifferenceFrom60 < 0) {
+            outcomeFromCards[bidWinnerName] = -(exchangeValue * 2); // Bidder loses double what defenders gain
+            defenders.forEach(def => outcomeFromCards[def] = exchangeValue);
         } else {
-            const scoreDifferenceFrom60 = bidderTotalCardPoints - 60;
-            const exchangeValue = Math.abs(scoreDifferenceFrom60) * currentBidMultiplier;
-            if (scoreDifferenceFrom60 > 0) {
-                actualChange[bidWinnerName] = exchangeValue * 2;
-                defenders.forEach(def => actualChange[def] = -exchangeValue);
-            } else if (scoreDifferenceFrom60 < 0) {
-                actualChange[bidWinnerName] = -exchangeValue * 3;
-                defenders.forEach(def => actualChange[def] = exchangeValue);
-            } else {
-                 playerOrderActive.forEach(p => actualChange[p] = 0);
-            }
+             playerOrderActive.forEach(p => outcomeFromCards[p] = 0);
         }
 
-        // Calculate what WOULD have happened in the alternate scenario
-        const potentialChange = {};
-        if (insurance.dealExecuted) {
-            // The alternate scenario is playing it out
-            const scoreDifferenceFrom60 = bidderTotalCardPoints - 60;
-            const exchangeValue = Math.abs(scoreDifferenceFrom60) * currentBidMultiplier;
-             if (scoreDifferenceFrom60 > 0) {
-                potentialChange[bidWinnerName] = exchangeValue * 2;
-                defenders.forEach(def => potentialChange[def] = -exchangeValue);
-            } else if (scoreDifferenceFrom60 < 0) {
-                potentialChange[bidWinnerName] = -exchangeValue * 3;
-                defenders.forEach(def => potentialChange[def] = exchangeValue);
-            } else {
-                 playerOrderActive.forEach(p => potentialChange[p] = 0);
-            }
-        } else {
-            // The alternate scenario is making the deal at the final asking price
-            potentialChange[bidWinnerName] = insurance.bidderRequirement;
-            // For hindsight, assume defenders would have split the requirement evenly
-            const evenSplit = Math.round(insurance.bidderRequirement / defenders.length);
-            defenders.forEach(def => potentialChange[def] = -evenSplit);
+        const outcomeFromDeal = {};
+        const agreement = insurance.dealExecuted ? insurance.executedDetails.agreement : { bidderPlayerName: insurance.bidderPlayerName, bidderRequirement: insurance.bidderRequirement, defenderOffers: insurance.defenderOffers };
+        outcomeFromDeal[agreement.bidderPlayerName] = agreement.bidderRequirement;
+        for (const defName in agreement.defenderOffers) {
+             outcomeFromDeal[defName] = -agreement.defenderOffers[defName];
         }
 
         playerOrderActive.forEach(pName => {
-            insuranceHindsight[pName] = (actualChange[pName] || 0) - (potentialChange[pName] || 0);
+            const actualPoints = insurance.dealExecuted ? outcomeFromDeal[pName] : outcomeFromCards[pName];
+            const potentialPoints = insurance.dealExecuted ? outcomeFromCards[pName] : outcomeFromDeal[pName];
+            
+            insuranceHindsight[pName] = {
+                actualPoints: actualPoints || 0,
+                actualReason: insurance.dealExecuted ? "Insurance Deal" : "Card Outcome",
+                potentialPoints: potentialPoints || 0,
+                potentialReason: insurance.dealExecuted ? "Played it Out" : "Taken Insurance Deal",
+                hindsightValue: (actualPoints || 0) - (potentialPoints || 0)
+            };
         });
     }
 
@@ -779,7 +767,7 @@ function calculateRoundScores(tableId) {
         insuranceDealWasMade: insurance.dealExecuted,
         insuranceDetails: insurance.dealExecuted ? insurance.executedDetails : null,
         insuranceHindsight: insuranceHindsight,
-        allTricks: table.capturedTricks // Send all captured tricks for detailed summary
+        allTricks: table.capturedTricks
     };
     
     table.state = isGameOver ? "Game Over" : "Awaiting Next Round Trigger";
