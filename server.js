@@ -1,4 +1,4 @@
-// --- Backend/server.js (v7.1.1 - Linger & All-Pass Fix) ---
+// --- Backend/server.js (v7.1.2 - Linger State Removed) ---
 require("dotenv").config();
 const http = require("http");
 const express = require("express");
@@ -15,7 +15,7 @@ const io = new Server(server, {
   cors: { origin: "*", methods: ["GET", "POST"] },
 });
 
-const SERVER_VERSION = "7.1.1 - Linger & All-Pass Fix";
+const SERVER_VERSION = "7.1.2 - Linger State Removed";
 let pool;
 
 // --- MIDDLEWARE ---
@@ -147,6 +147,7 @@ app.post("/api/auth/register", async (req, res) => {
         res.status(500).json({ message: "Server error during registration." });
     }
 });
+
 app.post("/api/auth/login", async (req, res) => {
     const { email, password } = req.body;
     if (!email || !password) return res.status(400).json({ message: "Email and password are required." });
@@ -163,6 +164,7 @@ app.post("/api/auth/login", async (req, res) => {
         res.status(500).json({ message: "Server error during login." });
     }
 });
+
 app.post("/api/user/change-username", authenticateToken, async (req, res) => {
     const { newUsername } = req.body;
     const userId = req.user.id;
@@ -436,25 +438,15 @@ io.on("connection", (socket) => {
                 table.capturedTricks[winnerInfo.playerName].push(table.currentTrickCards.map(p => p.card));
             }
             
-            // Reverted Logic: No button, just a timed delay.
-            const isFinalTrick = table.tricksPlayedCount === 11;
-            table.state = "TrickCompleteLinger";
-            emitTableUpdate(tableId);
-
-            setTimeout(() => {
-                const currentTable = tables[tableId];
-                if (currentTable && currentTable.state === "TrickCompleteLinger") {
-                    if (isFinalTrick) {
-                        calculateRoundScores(tableId);
-                    } else {
-                        currentTable.currentTrickCards = [];
-                        currentTable.leadSuitCurrentTrick = null;
-                        currentTable.trickTurnPlayerName = winnerInfo.playerName;
-                        currentTable.state = "Playing Phase";
-                        emitTableUpdate(tableId);
-                    }
-                }
-            }, isFinalTrick ? 3000 : 1000); // 3 second linger for final trick, 1 sec otherwise
+            if (table.tricksPlayedCount === 11) {
+                calculateRoundScores(tableId);
+            } else {
+                table.currentTrickCards = [];
+                table.leadSuitCurrentTrick = null;
+                table.trickTurnPlayerName = winnerInfo.playerName;
+                table.state = "Playing Phase";
+                emitTableUpdate(tableId);
+            }
         } else {
             const currentTurnPlayerIndex = table.playerOrderActive.indexOf(username);
             table.trickTurnPlayerName = table.playerOrderActive[(currentTurnPlayerIndex + 1) % expectedCardsInTrick];
@@ -769,7 +761,6 @@ function prepareNextRound(tableId) {
     const table = tables[tableId];
     if (!table || !table.gameStarted) return;
 
-    // CORRECTED TYPO HERE
     const allPlayerIds = Object.keys(table.players).filter(pId => !table.players[pId].isSpectator && !table.players[pId].disconnected).map(Number);
     if (allPlayerIds.length < 3) {
         resetTable(tableId);
