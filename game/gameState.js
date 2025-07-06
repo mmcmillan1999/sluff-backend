@@ -1,17 +1,9 @@
-// backend/game/state.js (v8.0.0 - Major Refactor)
+// backend/game/gameState.js
 
-const { SERVER_VERSION, NUM_TABLES } = require('./constants');
+const { SERVER_VERSION } = require('./constants');
 
-// This is the single source of truth for all game table states.
 let tables = {};
-
-const TABLE_NAMES = {
-    "table-1": "Fort Creek",
-    "table-2": "ShireCliff Road",
-    "table-3": "Table 3",
-};
-
-// --- State Initialization and Resetting ---
+const NUM_TABLES = 30; // Explicitly set the total number of tables
 
 function getInitialInsuranceState() {
     return {
@@ -20,27 +12,46 @@ function getInitialInsuranceState() {
     };
 }
 
+// This function now uses simple math to determine the name and theme
 function getInitialGameData(tableId) {
-    const tableName = TABLE_NAMES[tableId] || `Table ${tableId.split('-')[1]}`;
+    const tableNum = parseInt(tableId.split('-')[1], 10);
+    let themeId, themeName, name;
+
+    if (tableNum <= 10) {
+        themeId = 'fort-creek';
+        themeName = 'Fort Creek';
+        name = `${themeName} ${tableNum}`;
+    } else if (tableNum <= 20) {
+        themeId = 'shirecliff-road';
+        themeName = 'ShireCliff Road';
+        name = `${themeName} ${tableNum - 10}`;
+    } else {
+        themeId = 'dans-deck';
+        themeName = "Dan's Deck";
+        name = `${themeName} ${tableNum - 20}`;
+    }
+
     return {
-        tableId: tableId, tableName: tableName, state: "Waiting for Players", players: {},
-        playerOrderActive: [], dealer: null, hands: {}, widow: [], originalDealtWidow: [],
-        widowDiscardsForFrogBidder: [], scores: {}, bidsThisRound: [], currentHighestBidDetails: null,
-        biddingTurnPlayerName: null, bidsMadeCount: 0, originalFrogBidderId: null, soloBidMadeAfterFrog: false,
-        trumpSuit: null, bidWinnerInfo: null, gameStarted: false, currentTrickCards: [],
-        trickTurnPlayerName: null, tricksPlayedCount: 0, leadSuitCurrentTrick: null, trumpBroken: false,
-        trickLeaderName: null, capturedTricks: {}, roundSummary: null, revealedWidowForFrog: [],
-        lastCompletedTrick: null, playersWhoPassedThisRound: [], playerMode: null,
-        serverVersion: SERVER_VERSION, insurance: getInitialInsuranceState(),
+        tableId: tableId, tableName: name, theme: themeId, state: "Waiting for Players",
+        players: {}, playerOrderActive: [], dealer: null, hands: {}, widow: [],
+        originalDealtWidow: [], widowDiscardsForFrogBidder: [], scores: {}, bidsThisRound: [],
+        currentHighestBidDetails: null, biddingTurnPlayerName: null, bidsMadeCount: 0,
+        originalFrogBidderId: null, soloBidMadeAfterFrog: false, trumpSuit: null,
+        bidWinnerInfo: null, gameStarted: false, currentTrickCards: [], trickTurnPlayerName: null,
+        tricksPlayedCount: 0, leadSuitCurrentTrick: null, trumpBroken: false, trickLeaderName: null,
+        capturedTricks: {}, roundSummary: null, revealedWidowForFrog: [], lastCompletedTrick: null,
+        playersWhoPassedThisRound: [], playerMode: null, serverVersion: SERVER_VERSION,
+        insurance: getInitialInsuranceState(),
     };
 }
 
 function initializeGameTables() {
+    // A simple, direct loop from 1 to 30
     for (let i = 1; i <= NUM_TABLES; i++) {
         const tableId = `table-${i}`;
         tables[tableId] = getInitialGameData(tableId);
     }
-    console.log("In-memory game tables initialized.");
+    console.log(`${NUM_TABLES} in-memory game tables initialized.`);
 }
 
 function initializeNewRoundState(table) {
@@ -63,57 +74,35 @@ function resetTable(tableId, emitters) {
     const { emitTableUpdate, emitLobbyUpdate } = emitters;
     const table = tables[tableId];
     if (!table) return;
-    const originalPlayers = { ...table.players };
-    tables[tableId] = getInitialGameData(tableId);
-    const activePlayerNames = [];
-    for (const userId in originalPlayers) {
-        const playerInfo = originalPlayers[userId];
-        tables[tableId].players[userId] = { ...playerInfo, isSpectator: false, disconnected: playerInfo.disconnected };
-        tables[tableId].scores[playerInfo.playerName] = 120;
-        if (!playerInfo.isSpectator) {
-            activePlayerNames.push(playerInfo.playerName);
-        }
-    }
-    tables[tableId].playerOrderActive = activePlayerNames;
-    tables[tableId].gameStarted = true;
-    tables[tableId].playerMode = activePlayerNames.length;
-    if (activePlayerNames.length >= 3) {
-        tables[tableId].state = "Ready to Start";
-    } else {
-        tables[tableId].state = "Waiting for Players";
-    }
+    
+    tables[tableId] = getInitialGameData(tableId); // Re-initialize with correct name
+
     emitTableUpdate(tableId);
     emitLobbyUpdate();
 }
-
-// --- State Accessors and Getters ---
 
 function getTableById(tableId) { return tables[tableId]; }
 function getAllTables() { return tables; }
 
 function getLobbyState() {
+    const lobbyTables = Object.fromEntries(
+        Object.values(tables).map(table => {
+            const allPlayers = Object.values(table.players);
+            const activePlayers = allPlayers.filter(p => !p.isSpectator);
+            return [
+                table.tableId,
+                {
+                    tableId: table.tableId,
+                    tableName: table.tableName,
+                    state: table.state,
+                    playerCount: activePlayers.length,
+                }
+            ];
+        })
+    );
+
     const lobbyData = {
-        // --- MODIFICATION: Wrap tables in a 'tables' property ---
-        tables: Object.fromEntries(
-            Object.entries(tables).map(([tableId, table]) => {
-                const allPlayers = Object.values(table.players);
-                const activePlayers = allPlayers.filter(p => !p.isSpectator);
-                return [
-                    tableId,
-                    {
-                        tableId: table.tableId,
-                        tableName: table.tableName,
-                        state: table.state,
-                        players: activePlayers.map(p => ({
-                            userId: p.userId, playerName: p.playerName, disconnected: p.disconnected
-                        })),
-                        playerCount: activePlayers.length,
-                        spectatorCount: allPlayers.length - activePlayers.length,
-                    }
-                ];
-            })
-        ),
-        // --- MODIFICATION: Add the server version to the payload ---
+        tables: lobbyTables,
         serverVersion: SERVER_VERSION
     };
     return lobbyData;

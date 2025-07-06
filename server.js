@@ -10,7 +10,6 @@ const jwt = require("jsonwebtoken");
 // --- IMPORTS FROM MODULES ---
 const { SUITS, BID_HIERARCHY, PLACEHOLDER_ID, deck } = require('./game/constants');
 const gameLogic = require('./game/logic');
-// --- MODIFICATION: Require the newly named file ---
 const state = require('./game/gameState');
 const createAuthRoutes = require('./routes/auth');
 
