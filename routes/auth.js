@@ -1,18 +1,13 @@
-// backend/routes/auth.js (v8.0.0 - Major Refactor)
+// backend/routes/auth.js
 
 const express = require('express');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 
-/**
- * Creates and configures the Express router for authentication endpoints.
- * @param {object} pool - The connected 'pg' database pool.
- * @returns {object} The configured Express router.
- */
 function createAuthRoutes(pool) {
     const router = express.Router();
 
-    // --- API Route: /api/auth/register ---
+    // Register route remains the same, as the database now handles default values.
     router.post("/register", async (req, res) => {
         const { username, email, password } = req.body;
         if (!username || !email || !password) {
@@ -25,7 +20,7 @@ function createAuthRoutes(pool) {
             const result = await pool.query(newUserQuery, [username, email, passwordHash]);
             res.status(201).json({ message: "User created successfully", user: result.rows[0] });
         } catch (err) {
-            if (err.code === '23505') { // Unique constraint violation
+            if (err.code === '23505') {
                 return res.status(409).json({ message: "Username or email already exists." });
             }
             console.error("Error during registration:", err);
@@ -33,13 +28,14 @@ function createAuthRoutes(pool) {
         }
     });
 
-    // --- API Route: /api/auth/login ---
+    // --- MODIFICATION: Update login to fetch and return token balance ---
     router.post("/login", async (req, res) => {
         const { email, password } = req.body;
         if (!email || !password) {
             return res.status(400).json({ message: "Email and password are required." });
         }
         try {
+            // Fetch all user data, including new fields
             const userQuery = "SELECT * FROM users WHERE email = $1";
             const result = await pool.query(userQuery, [email]);
             const user = result.rows[0];
@@ -50,9 +46,19 @@ function createAuthRoutes(pool) {
             if (!isMatch) {
                 return res.status(401).json({ message: "Invalid credentials." });
             }
-            const payload = { id: user.id, username: user.username };
+            
+            // Add new fields to the JWT payload
+            const payload = { 
+                id: user.id, 
+                username: user.username,
+                tokens: user.tokens // <-- NEW
+            };
             const token = jwt.sign(payload, process.env.JWT_SECRET, { expiresIn: '1d' });
-            res.json({ message: "Logged in successfully", token: token, user: payload });
+
+            // Return the full user object (excluding password hash)
+            delete user.password_hash;
+            res.json({ message: "Logged in successfully", token: token, user: user });
+
         } catch (err) {
             console.error("Error during login:", err);
             res.status(500).json({ message: "Server error during login." });

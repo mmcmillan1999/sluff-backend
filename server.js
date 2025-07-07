@@ -1,4 +1,4 @@
-// --- Backend/server.js (v8.0.0 - Major Refactor) ---
+// --- Backend/server.js (v9.0.0 - Game Economy) ---
 require("dotenv").config();
 const http = require("http");
 const express = require("express");
@@ -8,7 +8,7 @@ const { Pool } = require("pg");
 const jwt = require("jsonwebtoken");
 
 // --- IMPORTS FROM MODULES ---
-const { SUITS, BID_HIERARCHY, PLACEHOLDER_ID, deck } = require('./game/constants');
+const { SUITS, BID_HIERARCHY, PLACEHOLDER_ID, deck, TABLE_COSTS } = require('./game/constants');
 const gameLogic = require('./game/logic');
 const state = require('./game/gameState');
 const createAuthRoutes = require('./routes/auth');
@@ -41,7 +41,11 @@ const createDbTables = async (dbPool) => {
             username VARCHAR(50) UNIQUE NOT NULL,
             email VARCHAR(255) UNIQUE NOT NULL,
             password_hash VARCHAR(255) NOT NULL,
-            created_at TIMESTAMPTZ DEFAULT NOW()
+            created_at TIMESTAMPTZ DEFAULT NOW(),
+            tokens INTEGER DEFAULT 8 NOT NULL,
+            wins INTEGER DEFAULT 0 NOT NULL,
+            losses INTEGER DEFAULT 0 NOT NULL,
+            washes INTEGER DEFAULT 0 NOT NULL
         );
     `;
     try {
@@ -122,25 +126,55 @@ io.on("connection", (socket) => {
         emitLobbyUpdate();
     });
 
-    socket.on("startGame", ({ tableId }) => {
+    socket.on("startGame", async ({ tableId }) => {
         const table = state.getTableById(tableId);
         if (!table || table.gameStarted) return;
-        const activePlayerIds = Object.keys(table.players).filter(id => !table.players[id].isSpectator && !table.players[id].disconnected);
-        if (activePlayerIds.length < 3) return socket.emit("error", "Need at least 3 players to start.");
         
-        table.gameStarted = true;
-        table.playerMode = activePlayerIds.length;
+        const activePlayers = Object.values(table.players).filter(p => !p.isSpectator && !p.disconnected);
+        if (activePlayers.length < 3) return socket.emit("error", "Need at least 3 players to start.");
 
-        activePlayerIds.forEach(id => { 
-            const pName = table.players[id].playerName;
-            if (table.scores[pName] === undefined) table.scores[pName] = 120; 
+        const tableCost = TABLE_COSTS[table.theme] || 0;
+
+        try {
+            // Check if all players can afford the buy-in
+            const playerCheckPromises = activePlayers.map(p => pool.query("SELECT tokens FROM users WHERE id = $1", [p.userId]));
+            const playerCheckResults = await Promise.all(playerCheckPromises);
+
+            for (let i = 0; i < activePlayers.length; i++) {
+                const player = activePlayers[i];
+                const dbPlayer = playerCheckResults[i].rows[0];
+                if (!dbPlayer || dbPlayer.tokens < tableCost) {
+                    const playerSocket = io.sockets.sockets.get(player.socketId);
+                    if(playerSocket) playerSocket.emit("error", `You need ${tableCost} tokens to play at this table.`);
+                    return; // Stop the game from starting
+                }
+            }
+
+            // Deduct tokens from all players
+            const tokenDeductionPromises = activePlayers.map(p => 
+                pool.query("UPDATE users SET tokens = tokens - $1 WHERE id = $2", [tableCost, p.userId])
+            );
+            await Promise.all(tokenDeductionPromises);
+
+        } catch (err) {
+            console.error("Database error during startGame token check/deduction:", err);
+            socket.emit("error", "A server error occurred. Could not start game.");
+            return;
+        }
+        
+        // If all checks pass, proceed with starting the game
+        table.gameStarted = true;
+        table.playerMode = activePlayers.length;
+
+        activePlayers.forEach(p => { 
+            if (table.scores[p.playerName] === undefined) table.scores[p.playerName] = 120; 
         });
 
         if (table.playerMode === 3 && table.scores[PLACEHOLDER_ID] === undefined) {
             table.scores[PLACEHOLDER_ID] = 120;
         }
 
-        const shuffledPlayerIds = shuffle(activePlayerIds.map(id => Number(id)));
+        const shuffledPlayerIds = shuffle(activePlayers.map(p => p.userId));
         table.dealer = shuffledPlayerIds[0];
 
         const dealerIndex = shuffledPlayerIds.indexOf(table.dealer);
@@ -310,7 +344,7 @@ io.on("connection", (socket) => {
             }
             
             if (table.tricksPlayedCount === 11) {
-                gameLogic.calculateRoundScores(table, io, getPlayerNameByUserId);
+                gameLogic.calculateRoundScores(table, io, pool, getPlayerNameByUserId);
             } else {
                 table.state = "TrickCompleteLinger";
                 emitTableUpdate(tableId);
@@ -426,7 +460,6 @@ server.listen(PORT, async () => {
     await pool.connect();
     console.log("✅ Database connection successful.");
     await createDbTables(pool);
-    // Use the pool to create the auth routes
     const authRoutes = createAuthRoutes(pool);
     app.use('/api/auth', authRoutes);
 

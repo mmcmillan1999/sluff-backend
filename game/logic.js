@@ -1,13 +1,14 @@
-// backend/game/logic.js (v8.0.0 - Major Refactor)
+// backend/game/logic.js (v9.0.0 - Game Economy)
 
 const {
     RANKS_ORDER,
     BID_MULTIPLIERS,
     PLACEHOLDER_ID,
-    CARD_POINT_VALUES
+    CARD_POINT_VALUES,
+    TABLE_COSTS
 } = require('./constants');
 
-// --- UTILITY HELPERS (Moved from server.js) ---
+// --- UTILITY HELPERS ---
 
 const getSuit = (cardStr) => (cardStr ? cardStr.slice(-1) : null);
 const getRank = (cardStr) => (cardStr ? cardStr.slice(0, -1) : null);
@@ -19,13 +20,6 @@ const calculateCardPoints = (cardsArray) => {
 
 // --- CORE LOGIC FUNCTIONS ---
 
-/**
- * Determines the winner of a completed trick based on lead suit and trump.
- * @param {Array} trickCards - Array of cards played in the trick.
- * @param {string} leadSuit - The suit that was led.
- * @param {string} trumpSuit - The current trump suit.
- * @returns {object} The winning play object { userId, playerName, card }.
- */
 function determineTrickWinner(trickCards, leadSuit, trumpSuit) {
     let highestTrumpPlay = null;
     let highestLeadSuitPlay = null;
@@ -48,11 +42,6 @@ function determineTrickWinner(trickCards, leadSuit, trumpSuit) {
 }
 
 
-/**
- * Transitions the game state to the main "Playing Phase" after bidding is complete.
- * @param {object} table - The game table state object.
- * @param {object} io - The Socket.IO server instance for emitting events.
- */
 function transitionToPlayingPhase(table, io) {
     table.state = "Playing Phase";
     table.tricksPlayedCount = 0;
@@ -77,16 +66,11 @@ function transitionToPlayingPhase(table, io) {
     io.to(table.tableId).emit("gameState", table);
 }
 
-/**
- * Calculates scores at the end of a round, creates the round summary, and sets the state for the next round.
- * @param {object} table - The game table state object.
- * @param {object} io - The Socket.IO server instance for emitting events.
- * @param {function} getPlayerNameByUserId - Helper to get player name from ID.
- */
-function calculateRoundScores(table, io, getPlayerNameByUserId) {
+// --- MODIFICATION: Updated to handle economy payouts and stats ---
+async function calculateRoundScores(table, io, pool, getPlayerNameByUserId) {
     if (!table || !table.bidWinnerInfo) return;
 
-    const { bidWinnerInfo, playerOrderActive, playerMode, scores, capturedTricks, widowDiscardsForFrogBidder, originalDealtWidow, insurance } = table;
+    const { bidWinnerInfo, playerOrderActive, playerMode, scores, capturedTricks, widowDiscardsForFrogBidder, originalDealtWidow, insurance, theme } = table;
     const bidWinnerName = bidWinnerInfo.playerName;
     const bidType = bidWinnerInfo.bid;
     const currentBidMultiplier = BID_MULTIPLIERS[bidType];
@@ -207,14 +191,49 @@ function calculateRoundScores(table, io, getPlayerNameByUserId) {
     }
 
     let isGameOver = false;
-    let gameWinner = null;
+    let gameWinnerName = null;
     if(Object.values(scores).filter(s => typeof s === 'number').some(score => score <= 0)) {
         isGameOver = true;
         const finalPlayerScores = Object.entries(scores).filter(([key]) => key !== PLACEHOLDER_ID);
         if (finalPlayerScores.length > 0) {
-            gameWinner = finalPlayerScores.sort((a,b) => b[1] - a[1])[0][0];
+            gameWinnerName = finalPlayerScores.sort((a,b) => b[1] - a[1])[0][0];
         }
-        roundMessage += ` GAME OVER! Winner: ${gameWinner}.`;
+        roundMessage += ` GAME OVER! Winner: ${gameWinnerName}.`;
+        
+        // --- NEW: Handle economy on game over ---
+        try {
+            const tableCost = TABLE_COSTS[theme] || 0;
+            const totalPot = tableCost * playerOrderActive.length;
+
+            const updatePromises = playerOrderActive.map(pName => {
+                const player = Object.values(table.players).find(p => p.playerName === pName);
+                if (!player) return Promise.resolve();
+
+                if (pName === gameWinnerName) {
+                    // Award pot to winner and increment wins
+                    return pool.query(
+                        "UPDATE users SET tokens = tokens + $1, wins = wins + 1 WHERE id = $2",
+                        [totalPot, player.userId]
+                    );
+                } else if (scores[pName] === scores[gameWinnerName]) {
+                    // Handle ties/washes
+                    return pool.query(
+                        "UPDATE users SET washes = washes + 1 WHERE id = $1",
+                        [player.userId]
+                    );
+                } else {
+                    // Increment losses for other players
+                    return pool.query(
+                        "UPDATE users SET losses = losses + 1 WHERE id = $1",
+                        [player.userId]
+                    );
+                }
+            });
+            await Promise.all(updatePromises);
+            console.log(`[${table.tableId}] Game over stats and tokens updated.`);
+        } catch(err) {
+            console.error("Database error during game over update:", err);
+        }
     }
 
     table.roundSummary = {
@@ -224,7 +243,7 @@ function calculateRoundScores(table, io, getPlayerNameByUserId) {
         defenderCardPoints: defendersTotalCardPoints,
         finalScores: { ...scores },
         isGameOver,
-        gameWinner,
+        gameWinner: gameWinnerName,
         dealerOfRoundId: table.dealer,
         widowForReveal,
         insuranceDealWasMade: insurance.dealExecuted,
@@ -237,12 +256,7 @@ function calculateRoundScores(table, io, getPlayerNameByUserId) {
     io.to(table.tableId).emit("gameState", table);
 }
 
-/**
- * Sets up the table for the next round of play.
- * @param {object} table - The game table state object.
- * @param {object} io - The Socket.IO server instance.
- * @param {object} helpers - An object containing helper functions like { resetTable, getPlayerNameByUserId, initializeNewRoundState, shuffle }.
- */
+
 function prepareNextRound(table, io, helpers) {
     if (!table || !table.gameStarted) return;
     const { resetTable, getPlayerNameByUserId, initializeNewRoundState, shuffle } = helpers;
@@ -270,18 +284,12 @@ function prepareNextRound(table, io, helpers) {
     io.to(table.tableId).emit("gameState", table);
 }
 
-/**
- * Resolves the bidding phase, determining the winner and transitioning to the next state.
- * @param {object} table - The game table state object.
- * @param {object} io - The Socket.IO server instance.
- * @param {object} helpers - An object of helper functions.
- */
+
 function resolveBiddingFinal(table, io, helpers) {
     if (!table.currentHighestBidDetails) {
         table.state = "AllPassWidowReveal";
         io.to(table.tableId).emit("gameState", table);
         setTimeout(() => {
-            // Re-fetch table from tables object in case it was reset
             const currentTable = helpers.getTableById(table.tableId); 
             if(currentTable && currentTable.state === "AllPassWidowReveal"){
                 prepareNextRound(currentTable, io, helpers);
@@ -313,12 +321,7 @@ function resolveBiddingFinal(table, io, helpers) {
     table.soloBidMadeAfterFrog = false;
 }
 
-/**
- * Specifically handles the logic for a "Frog Upgrade" scenario in bidding.
- * @param {object} table - The game table state object.
- * @param {object} io - The Socket.IO server instance.
- * @param {object} helpers - An object of helper functions.
- */
+
 function checkForFrogUpgrade(table, io, helpers) {
     if (table.soloBidMadeAfterFrog) {
         table.state = "Awaiting Frog Upgrade Decision";
@@ -337,6 +340,6 @@ module.exports = {
     prepareNextRound,
     resolveBiddingFinal,
     checkForFrogUpgrade,
-    getSuit, // Exporting helpers that might be needed elsewhere
+    getSuit,
     getRank,
 };

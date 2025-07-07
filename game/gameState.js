@@ -3,12 +3,7 @@
 const { SERVER_VERSION } = require('./constants');
 
 let tables = {};
-
-const THEMES = [
-    { id: 'fort-creek', name: 'Fort Creek', count: 10 },
-    { id: 'shirecliff-road', name: 'ShireCliff Road', count: 10 },
-    { id: 'dans-deck', name: "Dan's Deck", count: 10 },
-];
+const NUM_TABLES = 30; // Explicitly set the total number of tables
 
 function getInitialInsuranceState() {
     return {
@@ -17,14 +12,27 @@ function getInitialInsuranceState() {
     };
 }
 
-function getInitialGameData(tableId, theme) {
-    const themeIndex = THEMES.findIndex(t => t.id === theme.id);
-    const baseCount = themeIndex > 0 ? THEMES.slice(0, themeIndex).reduce((acc, t) => acc + t.count, 0) : 0;
-    const tableNumber = parseInt(tableId.split('-')[1], 10) - baseCount;
-    const tableName = `${theme.name} ${tableNumber}`;
+// This function now uses simple math to determine the name and theme
+function getInitialGameData(tableId) {
+    const tableNum = parseInt(tableId.split('-')[1], 10);
+    let themeId, themeName, name;
+
+    if (tableNum <= 10) {
+        themeId = 'fort-creek';
+        themeName = 'Fort Creek';
+        name = `${themeName} ${tableNum}`;
+    } else if (tableNum <= 20) {
+        themeId = 'shirecliff-road';
+        themeName = 'ShireCliff Road';
+        name = `${themeName} ${tableNum - 10}`;
+    } else {
+        themeId = 'dans-deck';
+        themeName = "Dan's Deck";
+        name = `${themeName} ${tableNum - 20}`;
+    }
 
     return {
-        tableId: tableId, tableName: tableName, theme: theme.id, state: "Waiting for Players",
+        tableId: tableId, tableName: name, theme: themeId, state: "Waiting for Players",
         players: {}, playerOrderActive: [], dealer: null, hands: {}, widow: [],
         originalDealtWidow: [], widowDiscardsForFrogBidder: [], scores: {}, bidsThisRound: [],
         currentHighestBidDetails: null, biddingTurnPlayerName: null, bidsMadeCount: 0,
@@ -38,15 +46,12 @@ function getInitialGameData(tableId, theme) {
 }
 
 function initializeGameTables() {
-    let tableCounter = 1;
-    THEMES.forEach(theme => {
-        for (let i = 0; i < theme.count; i++) {
-            const tableId = `table-${tableCounter}`;
-            tables[tableId] = getInitialGameData(tableId, theme);
-            tableCounter++;
-        }
-    });
-    console.log(`${tableCounter - 1} in-memory game tables initialized.`);
+    // A simple, direct loop from 1 to 30
+    for (let i = 1; i <= NUM_TABLES; i++) {
+        const tableId = `table-${i}`;
+        tables[tableId] = getInitialGameData(tableId);
+    }
+    console.log(`${NUM_TABLES} in-memory game tables initialized.`);
 }
 
 function initializeNewRoundState(table) {
@@ -65,30 +70,44 @@ function initializeNewRoundState(table) {
     });
 }
 
+// --- FIX: Corrected resetTable to preserve players ---
 function resetTable(tableId, emitters) {
     const { emitTableUpdate, emitLobbyUpdate } = emitters;
     const table = tables[tableId];
     if (!table) return;
 
     const originalPlayers = { ...table.players };
-    const themeId = table.theme;
-    const theme = THEMES.find(t => t.id === themeId) || { id: 'default', name: 'Default' };
     
-    tables[tableId] = getInitialGameData(tableId, theme);
+    // Get a fresh table structure but keep the original theme
+    const freshTable = getInitialGameData(tableId);
+    tables[tableId] = freshTable;
 
+    // Re-add the players and reset their scores
     const activePlayerNames = [];
     for (const userId in originalPlayers) {
         const playerInfo = originalPlayers[userId];
-        tables[tableId].players[userId] = { ...playerInfo, isSpectator: false, disconnected: playerInfo.disconnected };
+        
+        tables[tableId].players[userId] = { 
+            ...playerInfo, 
+            isSpectator: false, // Ensure re-seated players are not spectators
+            disconnected: playerInfo.disconnected 
+        };
         tables[tableId].scores[playerInfo.playerName] = 120;
+
         if (!playerInfo.isSpectator) {
             activePlayerNames.push(playerInfo.playerName);
         }
     }
+
     tables[tableId].playerOrderActive = activePlayerNames;
-    tables[tableId].gameStarted = true;
+    tables[tableId].gameStarted = true; // Keep game "locked" so new players can't take seats
     tables[tableId].playerMode = activePlayerNames.length;
-    tables[tableId].state = activePlayerNames.length >= 3 ? "Ready to Start" : "Waiting for Players";
+
+    if (activePlayerNames.length >= 3) {
+        tables[tableId].state = "Ready to Start";
+    } else {
+        tables[tableId].state = "Waiting for Players";
+    }
 
     emitTableUpdate(tableId);
     emitLobbyUpdate();
@@ -98,24 +117,24 @@ function getTableById(tableId) { return tables[tableId]; }
 function getAllTables() { return tables; }
 
 function getLobbyState() {
-    const groupedByTheme = THEMES.map(theme => {
-        const themeTables = Object.values(tables)
-            .filter(table => table.theme === theme.id)
-            .map(table => {
-                const allPlayers = Object.values(table.players);
-                const activePlayers = allPlayers.filter(p => !p.isSpectator);
-                return {
+    const lobbyTables = Object.fromEntries(
+        Object.values(tables).map(table => {
+            const allPlayers = Object.values(table.players);
+            const activePlayers = allPlayers.filter(p => !p.isSpectator);
+            return [
+                table.tableId,
+                {
                     tableId: table.tableId,
                     tableName: table.tableName,
                     state: table.state,
                     playerCount: activePlayers.length,
-                };
-            });
-        return { ...theme, tables: themeTables };
-    });
+                }
+            ];
+        })
+    );
 
     const lobbyData = {
-        themes: groupedByTheme,
+        tables: lobbyTables,
         serverVersion: SERVER_VERSION
     };
     return lobbyData;
