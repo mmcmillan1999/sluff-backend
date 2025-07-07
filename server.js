@@ -1,4 +1,4 @@
-// --- Backend/server.js (v9.0.1 - Free Token Button) ---
+// --- Backend/server.js (v9.0.2 - Sacrifice Token Button) ---
 require("dotenv").config();
 const http = require("http");
 const express = require("express");
@@ -86,7 +86,6 @@ io.on("connection", (socket) => {
 
     socket.emit("lobbyState", state.getLobbyState());
 
-    // --- NEW: Handler for free token requests ---
     socket.on("requestFreeToken", async () => {
         try {
             const result = await pool.query(
@@ -101,6 +100,22 @@ io.on("connection", (socket) => {
         } catch (err) {
             console.error("Error giving free token:", err);
             socket.emit("error", "Could not grant token.");
+        }
+    });
+
+    // --- NEW: Handler for sacrificing a token ---
+    socket.on("sacrificeToken", async () => {
+        try {
+            // Ensure tokens don't go below zero
+            const result = await pool.query("UPDATE users SET tokens = tokens - 1 WHERE id = $1 AND tokens > 0 RETURNING *", [socket.user.id]);
+            if (result.rows.length > 0) {
+                const updatedUser = result.rows[0];
+                delete updatedUser.password_hash;
+                socket.emit("updateUser", updatedUser);
+            }
+        } catch (err) {
+            console.error("Error sacrificing token:", err);
+            socket.emit("error", "Could not sacrifice token.");
         }
     });
 
