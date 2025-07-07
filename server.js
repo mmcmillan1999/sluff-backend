@@ -1,4 +1,4 @@
-// --- Backend/server.js (v9.0.0 - Game Economy) ---
+// --- Backend/server.js (v9.0.1 - Free Token Button) ---
 require("dotenv").config();
 const http = require("http");
 const express = require("express");
@@ -86,6 +86,24 @@ io.on("connection", (socket) => {
 
     socket.emit("lobbyState", state.getLobbyState());
 
+    // --- NEW: Handler for free token requests ---
+    socket.on("requestFreeToken", async () => {
+        try {
+            const result = await pool.query(
+                "UPDATE users SET tokens = tokens + 1 WHERE id = $1 RETURNING *",
+                [socket.user.id]
+            );
+            if (result.rows.length > 0) {
+                const updatedUser = result.rows[0];
+                delete updatedUser.password_hash; // Don't send the hash
+                socket.emit("updateUser", updatedUser); // Send updated user data back
+            }
+        } catch (err) {
+            console.error("Error giving free token:", err);
+            socket.emit("error", "Could not grant token.");
+        }
+    });
+
     socket.on("joinTable", ({ tableId }) => {
         const table = state.getTableById(tableId);
         if (!table) return socket.emit("error", "Table not found.");
@@ -136,7 +154,6 @@ io.on("connection", (socket) => {
         const tableCost = TABLE_COSTS[table.theme] || 0;
 
         try {
-            // Check if all players can afford the buy-in
             const playerCheckPromises = activePlayers.map(p => pool.query("SELECT tokens FROM users WHERE id = $1", [p.userId]));
             const playerCheckResults = await Promise.all(playerCheckPromises);
 
@@ -146,11 +163,10 @@ io.on("connection", (socket) => {
                 if (!dbPlayer || dbPlayer.tokens < tableCost) {
                     const playerSocket = io.sockets.sockets.get(player.socketId);
                     if(playerSocket) playerSocket.emit("error", `You need ${tableCost} tokens to play at this table.`);
-                    return; // Stop the game from starting
+                    return;
                 }
             }
 
-            // Deduct tokens from all players
             const tokenDeductionPromises = activePlayers.map(p => 
                 pool.query("UPDATE users SET tokens = tokens - $1 WHERE id = $2", [tableCost, p.userId])
             );
@@ -162,7 +178,6 @@ io.on("connection", (socket) => {
             return;
         }
         
-        // If all checks pass, proceed with starting the game
         table.gameStarted = true;
         table.playerMode = activePlayers.length;
 
