@@ -71,8 +71,10 @@ function resetTable(tableId, emitters) {
     if (!table) return;
 
     const originalPlayers = { ...table.players };
-    const freshTable = getInitialGameData(tableId);
-    tables[tableId] = freshTable;
+    const themeId = table.theme;
+    const theme = THEMES.find(t => t.id === themeId) || { id: 'default', name: 'Default' };
+    
+    tables[tableId] = getInitialGameData(tableId, theme);
 
     const activePlayerNames = [];
     for (const userId in originalPlayers) {
