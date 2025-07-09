@@ -23,9 +23,11 @@ function createLeaderboardRoutes(pool) {
 
     router.get('/', protectedRoute, async (req, res) => {
         try {
+            // --- MODIFICATION: Added a WHERE clause to filter out users with 0 games played ---
             const query = `
                 SELECT username, email, wins, losses, washes, tokens 
                 FROM users 
+                WHERE (wins + losses + washes) > 0
                 ORDER BY tokens DESC;
             `;
             const { rows } = await pool.query(query);
