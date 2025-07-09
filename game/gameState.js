@@ -104,14 +104,15 @@ function getLobbyState() {
             .map(table => {
                 const allPlayers = Object.values(table.players);
                 const activePlayers = allPlayers.filter(p => !p.isSpectator);
+                // --- MODIFICATION: Add playerNames to the returned object ---
                 return {
                     tableId: table.tableId,
                     tableName: table.tableName,
                     state: table.state,
                     playerCount: activePlayers.length,
+                    playerNames: activePlayers.map(p => p.playerName) // Add this line
                 };
             });
-        // --- MODIFICATION: Add cost to each theme ---
         return { ...theme, cost: TABLE_COSTS[theme.id] || 0, tables: themeTables };
     });
 
