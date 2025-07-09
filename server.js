@@ -443,10 +443,17 @@ io.on("connection", (socket) => {
         }
     });
 
-    socket.on("hardResetServer", () => {
-        console.log(`[ADMIN] User ${socket.user.username} initiated a hard server reset.`);
-        state.initializeGameTables();
-        io.emit("forceDisconnectAndReset", "The game server was reset by an administrator.");
+    // --- MODIFICATION: Secure the hard reset function ---
+    socket.on("hardResetServer", ({ secret }) => {
+        const correctSecret = "Mouse_4357835210";
+        if (secret === correctSecret) {
+            console.log(`[ADMIN] User ${socket.user.username} initiated a successful hard server reset.`);
+            state.initializeGameTables();
+            io.emit("forceDisconnectAndReset", "The game server was reset by an administrator.");
+        } else {
+            console.log(`[ADMIN] User ${socket.user.username} failed a hard server reset attempt.`);
+            socket.emit("error", "Incorrect secret for server reset.");
+        }
     });
 
     socket.on("disconnect", (reason) => {
