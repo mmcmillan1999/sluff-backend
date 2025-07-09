@@ -12,7 +12,6 @@ const { SUITS, BID_HIERARCHY, PLACEHOLDER_ID, deck, TABLE_COSTS } = require('./g
 const gameLogic = require('./game/logic');
 const state = require('./game/gameState');
 const createAuthRoutes = require('./routes/auth');
-// --- MODIFICATION: Import the new leaderboard routes ---
 const createLeaderboardRoutes = require('./routes/leaderboard');
 
 
@@ -97,8 +96,8 @@ io.on("connection", (socket) => {
             );
             if (result.rows.length > 0) {
                 const updatedUser = result.rows[0];
-                delete updatedUser.password_hash; // Don't send the hash
-                socket.emit("updateUser", updatedUser); // Send updated user data back
+                delete updatedUser.password_hash;
+                socket.emit("updateUser", updatedUser);
             }
         } catch (err) {
             console.error("Error giving free token:", err);
@@ -483,6 +482,37 @@ io.on("connection", (socket) => {
         }
     });
 
+    // --- MODIFICATION: Add new handler for resetting all tokens ---
+    socket.on("resetAllTokens", async ({ secret }) => {
+        const correctSecret = "Ben_Celica_2479_Gines";
+        if (secret !== correctSecret) {
+            console.log(`[ADMIN] User ${socket.user.username} failed a token reset attempt.`);
+            return socket.emit("error", "Incorrect secret for token reset.");
+        }
+
+        try {
+            console.log(`[ADMIN] User ${socket.user.username} initiated a successful token reset.`);
+            await pool.query("UPDATE users SET tokens = 8");
+
+            // Notify all connected clients to update their user state
+            const allSockets = await io.fetchSockets();
+            for (const sock of allSockets) {
+                const userResult = await pool.query("SELECT * FROM users WHERE id = $1", [sock.userId]);
+                const updatedUser = userResult.rows[0];
+                if (updatedUser) {
+                    delete updatedUser.password_hash;
+                    sock.emit("updateUser", updatedUser);
+                }
+            }
+            // Also refresh the lobby view for everyone
+            emitLobbyUpdate();
+
+        } catch (err) {
+            console.error("Error during token reset:", err);
+            socket.emit("error", "Server error during token reset.");
+        }
+    });
+
     socket.on("disconnect", (reason) => {
         const userId = socket.userId;
         if (!userId) return;
@@ -527,7 +557,6 @@ server.listen(PORT, async () => {
     const authRoutes = createAuthRoutes(pool);
     app.use('/api/auth', authRoutes);
 
-    // --- MODIFICATION: Use the new leaderboard routes ---
     const leaderboardRoutes = createLeaderboardRoutes(pool);
     app.use('/api/leaderboard', leaderboardRoutes);
 
