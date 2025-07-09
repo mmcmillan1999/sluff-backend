@@ -12,6 +12,9 @@ const { SUITS, BID_HIERARCHY, PLACEHOLDER_ID, deck, TABLE_COSTS } = require('./g
 const gameLogic = require('./game/logic');
 const state = require('./game/gameState');
 const createAuthRoutes = require('./routes/auth');
+// --- MODIFICATION: Import the new leaderboard routes ---
+const createLeaderboardRoutes = require('./routes/leaderboard');
+
 
 // --- INITIALIZATIONS ---
 const app = express();
@@ -199,7 +202,6 @@ io.on("connection", (socket) => {
             );
             await Promise.all(tokenDeductionPromises);
 
-            // --- MODIFICATION: Fetch updated user data and notify each player ---
             const updateUserPromises = activePlayers.map(async (player) => {
                 const updatedUserResult = await pool.query("SELECT * FROM users WHERE id = $1", [player.userId]);
                 const updatedUser = updatedUserResult.rows[0];
@@ -212,7 +214,6 @@ io.on("connection", (socket) => {
                 }
             });
             await Promise.all(updateUserPromises);
-            // --- END MODIFICATION ---
 
         } catch (err) {
             console.error("Database error during startGame token check/deduction:", err);
@@ -525,6 +526,10 @@ server.listen(PORT, async () => {
     await createDbTables(pool);
     const authRoutes = createAuthRoutes(pool);
     app.use('/api/auth', authRoutes);
+
+    // --- MODIFICATION: Use the new leaderboard routes ---
+    const leaderboardRoutes = createLeaderboardRoutes(pool);
+    app.use('/api/leaderboard', leaderboardRoutes);
 
     state.initializeGameTables();
   } catch (err) {
