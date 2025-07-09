@@ -117,7 +117,6 @@ io.on("connection", (socket) => {
         }
     });
 
-    // --- MODIFICATION: Added token check before joining a table ---
     socket.on("joinTable", async ({ tableId }) => {
         const table = state.getTableById(tableId);
         if (!table) return socket.emit("error", "Table not found.");
@@ -199,6 +198,21 @@ io.on("connection", (socket) => {
                 pool.query("UPDATE users SET tokens = tokens - $1 WHERE id = $2", [tableCost, p.userId])
             );
             await Promise.all(tokenDeductionPromises);
+
+            // --- MODIFICATION: Fetch updated user data and notify each player ---
+            const updateUserPromises = activePlayers.map(async (player) => {
+                const updatedUserResult = await pool.query("SELECT * FROM users WHERE id = $1", [player.userId]);
+                const updatedUser = updatedUserResult.rows[0];
+                if (updatedUser) {
+                    delete updatedUser.password_hash;
+                    const playerSocket = io.sockets.sockets.get(player.socketId);
+                    if (playerSocket) {
+                        playerSocket.emit("updateUser", updatedUser);
+                    }
+                }
+            });
+            await Promise.all(updateUserPromises);
+            // --- END MODIFICATION ---
 
         } catch (err) {
             console.error("Database error during startGame token check/deduction:", err);
