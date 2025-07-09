@@ -2,7 +2,7 @@
 require("dotenv").config();
 const http = require("http");
 const express = require("express");
-const cors = require("cors");
+const cors =require("cors");
 const { Server } = require("socket.io");
 const { Pool } = require("pg");
 const jwt = require("jsonwebtoken");
@@ -103,10 +103,8 @@ io.on("connection", (socket) => {
         }
     });
 
-    // --- NEW: Handler for sacrificing a token ---
     socket.on("sacrificeToken", async () => {
         try {
-            // Ensure tokens don't go below zero
             const result = await pool.query("UPDATE users SET tokens = tokens - 1 WHERE id = $1 AND tokens > 0 RETURNING *", [socket.user.id]);
             if (result.rows.length > 0) {
                 const updatedUser = result.rows[0];
@@ -119,10 +117,25 @@ io.on("connection", (socket) => {
         }
     });
 
-    socket.on("joinTable", ({ tableId }) => {
+    // --- MODIFICATION: Added token check before joining a table ---
+    socket.on("joinTable", async ({ tableId }) => {
         const table = state.getTableById(tableId);
         if (!table) return socket.emit("error", "Table not found.");
+        
         const { id, username } = socket.user;
+        const tableCost = TABLE_COSTS[table.theme] || 0;
+
+        try {
+            const userResult = await pool.query("SELECT tokens FROM users WHERE id = $1", [id]);
+            const userTokens = userResult.rows[0]?.tokens;
+
+            if (userTokens < tableCost) {
+                return socket.emit("error", `You need ${tableCost} tokens to join this table. You have ${userTokens}.`);
+            }
+        } catch (err) {
+            console.error("Database error during joinTable token check:", err);
+            return socket.emit("error", "A server error occurred trying to join the table.");
+        }
 
         if (table.gameStarted && !table.players[id]) {
             return socket.emit("error", "Game has already started.");
@@ -176,8 +189,8 @@ io.on("connection", (socket) => {
                 const player = activePlayers[i];
                 const dbPlayer = playerCheckResults[i].rows[0];
                 if (!dbPlayer || dbPlayer.tokens < tableCost) {
-                    const playerSocket = io.sockets.sockets.get(player.socketId);
-                    if(playerSocket) playerSocket.emit("error", `You need ${tableCost} tokens to play at this table.`);
+                    const insufficientFundsMessage = `${player.playerName} does not have enough tokens to start the game (Cost: ${tableCost}).`;
+                    io.to(tableId).emit("error", insufficientFundsMessage);
                     return;
                 }
             }
@@ -443,7 +456,6 @@ io.on("connection", (socket) => {
         }
     });
 
-    // --- MODIFICATION: Secure the hard reset function ---
     socket.on("hardResetServer", ({ secret }) => {
         const correctSecret = "Mouse_4357835210";
         if (secret === correctSecret) {
