@@ -223,7 +223,6 @@ io.on("connection", (socket) => {
         
         const { id, username } = socket.user;
         
-        // --- MODIFICATION: Allow players to rejoin a game they are already in, regardless of token count ---
         const isPlayerAlreadyInGame = table.players[id];
         if (!isPlayerAlreadyInGame) {
             const tableCost = TABLE_COSTS[table.theme] || 0;
@@ -239,7 +238,6 @@ io.on("connection", (socket) => {
                 return socket.emit("error", "A server error occurred trying to join the table.");
             }
         }
-        // --- END MODIFICATION ---
 
         if (table.gameStarted && !isPlayerAlreadyInGame) {
             return socket.emit("error", "Game has already started.");
