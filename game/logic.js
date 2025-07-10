@@ -39,7 +39,7 @@ function calculateForfeitPayout(table, forfeitingPlayerName) {
         return sum + score;
     }, 0);
 
-    const tokenChanges = {};
+    const payoutDetails = {};
 
     if (totalScoreOfRemaining > 0) {
         remainingPlayers.forEach(player => {
@@ -47,19 +47,26 @@ function calculateForfeitPayout(table, forfeitingPlayerName) {
             const proportion = playerScore / totalScoreOfRemaining;
             const shareOfForfeit = proportion * forfeitedBuyIn;
             const totalPayout = tableBuyIn + shareOfForfeit;
-            // --- MODIFICATION: Round to 2 decimal places ---
-            tokenChanges[player.playerName] = Math.round(totalPayout * 100) / 100;
+            
+            payoutDetails[player.playerName] = {
+                buyInReturned: tableBuyIn,
+                forfeitShare: Math.round(shareOfForfeit * 100) / 100,
+                totalGain: Math.round(totalPayout * 100) / 100
+            };
         });
     } else {
         const evenShare = forfeitedBuyIn / remainingPlayers.length;
         remainingPlayers.forEach(player => {
             const totalPayout = tableBuyIn + evenShare;
-            // --- MODIFICATION: Round to 2 decimal places ---
-            tokenChanges[player.playerName] = Math.round(totalPayout * 100) / 100;
+            payoutDetails[player.playerName] = {
+                buyInReturned: tableBuyIn,
+                forfeitShare: Math.round(evenShare * 100) / 100,
+                totalGain: Math.round(totalPayout * 100) / 100
+            };
         });
     }
 
-    return tokenChanges;
+    return payoutDetails;
 }
 
 
