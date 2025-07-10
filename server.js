@@ -250,6 +250,43 @@ io.on("connection", (socket) => {
         emitLobbyUpdate();
     });
 
+    socket.on("leaveTable", async ({ tableId }) => {
+        const table = state.getTableById(tableId);
+        const userId = socket.user.id;
+        if (!table || !table.players[userId]) return;
+
+        const playerInfo = table.players[userId];
+        const playerIsSpectator = playerInfo.isSpectator;
+
+        const safeLeaveStates = ["Waiting for Players", "Ready to Start"];
+        const isEligibleForRefund = table.state === "Dealing Pending" && table.scores[playerInfo.playerName] === 120;
+
+        if (safeLeaveStates.includes(table.state) || playerIsSpectator) {
+            delete table.players[userId];
+        } else if (isEligibleForRefund) {
+            const tableCost = TABLE_COSTS[table.theme] || 0;
+            if (tableCost > 0) {
+                try {
+                    await pool.query("UPDATE users SET tokens = tokens + $1 WHERE id = $2", [tableCost, userId]);
+                    const updatedUserResult = await pool.query("SELECT * FROM users WHERE id = $1", [userId]);
+                    const updatedUser = updatedUserResult.rows[0];
+                    if (updatedUser) {
+                        delete updatedUser.password_hash;
+                        socket.emit("updateUser", updatedUser);
+                    }
+                } catch (err) {
+                    console.error(`Error refunding tokens to user ${userId}:`, err);
+                }
+            }
+            delete table.players[userId];
+        } else {
+            playerInfo.disconnected = true;
+        }
+        
+        emitTableUpdate(tableId);
+        emitLobbyUpdate();
+    });
+
     socket.on("dealCards", ({ tableId }) => {
         const table = state.getTableById(tableId);
         if (!table || table.state !== "Dealing Pending" || socket.user.id !== table.dealer) return;
@@ -482,7 +519,6 @@ io.on("connection", (socket) => {
         }
     });
 
-    // --- MODIFICATION: Add new handler for resetting all tokens ---
     socket.on("resetAllTokens", async ({ secret }) => {
         const correctSecret = "Ben_Celica_2479_Gines";
         if (secret !== correctSecret) {
@@ -494,7 +530,6 @@ io.on("connection", (socket) => {
             console.log(`[ADMIN] User ${socket.user.username} initiated a successful token reset.`);
             await pool.query("UPDATE users SET tokens = 8");
 
-            // Notify all connected clients to update their user state
             const allSockets = await io.fetchSockets();
             for (const sock of allSockets) {
                 const userResult = await pool.query("SELECT * FROM users WHERE id = $1", [sock.userId]);
@@ -504,7 +539,6 @@ io.on("connection", (socket) => {
                     sock.emit("updateUser", updatedUser);
                 }
             }
-            // Also refresh the lobby view for everyone
             emitLobbyUpdate();
 
         } catch (err) {
