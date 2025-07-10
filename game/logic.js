@@ -34,8 +34,6 @@ function calculateForfeitPayout(table, forfeitingPlayerName) {
     const tableBuyIn = TABLE_COSTS[table.theme] || 0;
     const forfeitedBuyIn = tableBuyIn;
 
-    // Calculate the total score of the remaining players to determine the ratio.
-    // Treat scores below 0 as 0 for this calculation to prevent negative ratios.
     const totalScoreOfRemaining = remainingPlayers.reduce((sum, player) => {
         const score = table.scores[player.playerName] > 0 ? table.scores[player.playerName] : 0;
         return sum + score;
@@ -44,20 +42,20 @@ function calculateForfeitPayout(table, forfeitingPlayerName) {
     const tokenChanges = {};
 
     if (totalScoreOfRemaining > 0) {
-        // Distribute proportionally based on score
         remainingPlayers.forEach(player => {
             const playerScore = table.scores[player.playerName] > 0 ? table.scores[player.playerName] : 0;
             const proportion = playerScore / totalScoreOfRemaining;
             const shareOfForfeit = proportion * forfeitedBuyIn;
-            
-            // Each remaining player gets their buy-in back, plus a proportional share of the forfeit
-            tokenChanges[player.playerName] = tableBuyIn + shareOfForfeit;
+            const totalPayout = tableBuyIn + shareOfForfeit;
+            // --- MODIFICATION: Round to 2 decimal places ---
+            tokenChanges[player.playerName] = Math.round(totalPayout * 100) / 100;
         });
     } else {
-        // If all remaining players have a score of 0 or less, split the forfeit evenly
         const evenShare = forfeitedBuyIn / remainingPlayers.length;
         remainingPlayers.forEach(player => {
-            tokenChanges[player.playerName] = tableBuyIn + evenShare;
+            const totalPayout = tableBuyIn + evenShare;
+            // --- MODIFICATION: Round to 2 decimal places ---
+            tokenChanges[player.playerName] = Math.round(totalPayout * 100) / 100;
         });
     }
 

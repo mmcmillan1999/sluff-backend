@@ -77,6 +77,7 @@ async function resolveForfeit(tableId, forfeitingPlayerName, reason) {
 
 
 const createDbTables = async (dbPool) => {
+    // --- MODIFICATION: Changed 'tokens' column to support decimals ---
     const userTableQuery = `
         CREATE TABLE IF NOT EXISTS users (
             id SERIAL PRIMARY KEY,
@@ -84,7 +85,7 @@ const createDbTables = async (dbPool) => {
             email VARCHAR(255) UNIQUE NOT NULL,
             password_hash VARCHAR(255) NOT NULL,
             created_at TIMESTAMPTZ DEFAULT NOW(),
-            tokens INTEGER DEFAULT 8 NOT NULL,
+            tokens NUMERIC(10, 2) DEFAULT 8.00 NOT NULL,
             wins INTEGER DEFAULT 0 NOT NULL,
             losses INTEGER DEFAULT 0 NOT NULL,
             washes INTEGER DEFAULT 0 NOT NULL
