@@ -45,18 +45,27 @@ async function resolveForfeit(tableId, forfeitingPlayerName, reason) {
     table.forfeiture = { targetPlayerName: null, timeLeft: null };
 
     const forfeitingPlayer = Object.values(table.players).find(p => p.playerName === forfeitingPlayerName);
-    const remainingPlayers = Object.values(table.players).filter(p => !p.isSpectator && p.playerName !== forfeitingPlayerName);
+    // --- MODIFICATION: This list now correctly filters out any other disconnected players ---
+    const remainingPlayers = Object.values(table.players).filter(p => 
+        !p.isSpectator && 
+        !p.disconnected && 
+        p.playerName !== forfeitingPlayerName
+    );
     
     const tokenChanges = gameLogic.calculateForfeitPayout(table, forfeitingPlayerName);
     
     try {
         const dbPromises = [];
+        // Update forfeiter's stats
         if (forfeitingPlayer) {
             dbPromises.push(pool.query("UPDATE users SET losses = losses + 1 WHERE id = $1", [forfeitingPlayer.userId]));
         }
+        // Update remaining players' stats and tokens
         remainingPlayers.forEach(player => {
-            const tokenGain = tokenChanges[player.playerName] || 0;
-            dbPromises.push(pool.query("UPDATE users SET tokens = tokens + $1, washes = washes + 1 WHERE id = $2", [tokenGain, player.userId]));
+            if (tokenChanges[player.playerName]) {
+                const tokenGain = tokenChanges[player.playerName].totalGain || 0;
+                dbPromises.push(pool.query("UPDATE users SET tokens = tokens + $1, washes = washes + 1 WHERE id = $2", [tokenGain, player.userId]));
+            }
         });
         await Promise.all(dbPromises);
     } catch (err) {
@@ -77,7 +86,6 @@ async function resolveForfeit(tableId, forfeitingPlayerName, reason) {
 
 
 const createDbTables = async (dbPool) => {
-    // --- MODIFICATION: Changed 'tokens' column to support decimals ---
     const userTableQuery = `
         CREATE TABLE IF NOT EXISTS users (
             id SERIAL PRIMARY KEY,
