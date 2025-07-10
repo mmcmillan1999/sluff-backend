@@ -135,7 +135,6 @@ io.on("connection", (socket) => {
 
     socket.emit("lobbyState", state.getLobbyState());
 
-    // --- MODIFICATION: New handler to force a user data sync ---
     socket.on("requestUserSync", async () => {
         try {
             const userResult = await pool.query("SELECT * FROM users WHERE id = $1", [socket.user.id]);
@@ -223,21 +222,26 @@ io.on("connection", (socket) => {
         if (!table) return socket.emit("error", "Table not found.");
         
         const { id, username } = socket.user;
-        const tableCost = TABLE_COSTS[table.theme] || 0;
+        
+        // --- MODIFICATION: Allow players to rejoin a game they are already in, regardless of token count ---
+        const isPlayerAlreadyInGame = table.players[id];
+        if (!isPlayerAlreadyInGame) {
+            const tableCost = TABLE_COSTS[table.theme] || 0;
+            try {
+                const userResult = await pool.query("SELECT tokens FROM users WHERE id = $1", [id]);
+                const userTokens = userResult.rows[0]?.tokens;
 
-        try {
-            const userResult = await pool.query("SELECT tokens FROM users WHERE id = $1", [id]);
-            const userTokens = userResult.rows[0]?.tokens;
-
-            if (userTokens < tableCost) {
-                return socket.emit("error", `You need ${tableCost} tokens to join this table. You have ${userTokens}.`);
+                if (userTokens < tableCost) {
+                    return socket.emit("error", `You need ${tableCost} tokens to join this table. You have ${userTokens}.`);
+                }
+            } catch (err) {
+                console.error("Database error during joinTable token check:", err);
+                return socket.emit("error", "A server error occurred trying to join the table.");
             }
-        } catch (err) {
-            console.error("Database error during joinTable token check:", err);
-            return socket.emit("error", "A server error occurred trying to join the table.");
         }
+        // --- END MODIFICATION ---
 
-        if (table.gameStarted && !table.players[id]) {
+        if (table.gameStarted && !isPlayerAlreadyInGame) {
             return socket.emit("error", "Game has already started.");
         }
 
