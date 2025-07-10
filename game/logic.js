@@ -1,4 +1,4 @@
-// backend/game/logic.js (v9.0.0 - Game Economy)
+// backend/game/logic.js
 
 const {
     RANKS_ORDER,
@@ -19,6 +19,51 @@ const calculateCardPoints = (cardsArray) => {
 };
 
 // --- CORE LOGIC FUNCTIONS ---
+
+function calculateForfeitPayout(table, forfeitingPlayerName) {
+    const remainingPlayers = Object.values(table.players).filter(p => 
+        !p.isSpectator && 
+        !p.disconnected && 
+        p.playerName !== forfeitingPlayerName
+    );
+
+    if (remainingPlayers.length === 0) {
+        return {}; // No one left to pay out
+    }
+
+    const tableBuyIn = TABLE_COSTS[table.theme] || 0;
+    const forfeitedBuyIn = tableBuyIn;
+
+    // Calculate the total score of the remaining players to determine the ratio.
+    // Treat scores below 0 as 0 for this calculation to prevent negative ratios.
+    const totalScoreOfRemaining = remainingPlayers.reduce((sum, player) => {
+        const score = table.scores[player.playerName] > 0 ? table.scores[player.playerName] : 0;
+        return sum + score;
+    }, 0);
+
+    const tokenChanges = {};
+
+    if (totalScoreOfRemaining > 0) {
+        // Distribute proportionally based on score
+        remainingPlayers.forEach(player => {
+            const playerScore = table.scores[player.playerName] > 0 ? table.scores[player.playerName] : 0;
+            const proportion = playerScore / totalScoreOfRemaining;
+            const shareOfForfeit = proportion * forfeitedBuyIn;
+            
+            // Each remaining player gets their buy-in back, plus a proportional share of the forfeit
+            tokenChanges[player.playerName] = tableBuyIn + shareOfForfeit;
+        });
+    } else {
+        // If all remaining players have a score of 0 or less, split the forfeit evenly
+        const evenShare = forfeitedBuyIn / remainingPlayers.length;
+        remainingPlayers.forEach(player => {
+            tokenChanges[player.playerName] = tableBuyIn + evenShare;
+        });
+    }
+
+    return tokenChanges;
+}
+
 
 function determineTrickWinner(trickCards, leadSuit, trumpSuit) {
     let highestTrumpPlay = null;
@@ -66,7 +111,6 @@ function transitionToPlayingPhase(table, io) {
     io.to(table.tableId).emit("gameState", table);
 }
 
-// --- MODIFICATION: Updated to handle economy payouts and stats ---
 async function calculateRoundScores(table, io, pool, getPlayerNameByUserId) {
     if (!table || !table.bidWinnerInfo) return;
 
@@ -200,7 +244,6 @@ async function calculateRoundScores(table, io, pool, getPlayerNameByUserId) {
         }
         roundMessage += ` GAME OVER! Winner: ${gameWinnerName}.`;
         
-        // --- NEW: Handle economy on game over ---
         try {
             const tableCost = TABLE_COSTS[theme] || 0;
             const totalPot = tableCost * playerOrderActive.length;
@@ -210,19 +253,16 @@ async function calculateRoundScores(table, io, pool, getPlayerNameByUserId) {
                 if (!player) return Promise.resolve();
 
                 if (pName === gameWinnerName) {
-                    // Award pot to winner and increment wins
                     return pool.query(
                         "UPDATE users SET tokens = tokens + $1, wins = wins + 1 WHERE id = $2",
                         [totalPot, player.userId]
                     );
                 } else if (scores[pName] === scores[gameWinnerName]) {
-                    // Handle ties/washes
                     return pool.query(
                         "UPDATE users SET washes = washes + 1 WHERE id = $1",
                         [player.userId]
                     );
                 } else {
-                    // Increment losses for other players
                     return pool.query(
                         "UPDATE users SET losses = losses + 1 WHERE id = $1",
                         [player.userId]
@@ -342,4 +382,5 @@ module.exports = {
     checkForFrogUpgrade,
     getSuit,
     getRank,
+    calculateForfeitPayout,
 };

@@ -1,4 +1,4 @@
-// --- Backend/server.js (v9.0.2 - Sacrifice Token Button) ---
+// --- Backend/server.js ---
 require("dotenv").config();
 const http = require("http");
 const express = require("express");
@@ -7,27 +7,23 @@ const { Server } = require("socket.io");
 const { Pool } = require("pg");
 const jwt = require("jsonwebtoken");
 
-// --- IMPORTS FROM MODULES ---
 const { SUITS, BID_HIERARCHY, PLACEHOLDER_ID, deck, TABLE_COSTS } = require('./game/constants');
 const gameLogic = require('./game/logic');
 const state = require('./game/gameState');
 const createAuthRoutes = require('./routes/auth');
 const createLeaderboardRoutes = require('./routes/leaderboard');
 
-
-// --- INITIALIZATIONS ---
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server, {
   cors: { origin: "*", methods: ["GET", "POST"] },
 });
-let pool; 
+let pool;
+let activeTimers = {}; // --- MODIFICATION: To store active timeout intervals ---
 
-// --- MIDDLEWARE ---
 app.use(cors({ origin: "*" }));
 app.use(express.json());
 
-// --- HELPERS (Networking & Utility) ---
 const emitLobbyUpdate = () => io.emit("lobbyState", state.getLobbyState());
 const emitTableUpdate = (tableId) => {
     const table = state.getTableById(tableId);
@@ -35,6 +31,54 @@ const emitTableUpdate = (tableId) => {
 };
 const getPlayerNameByUserId = (userId, table) => table?.players[userId]?.playerName || String(userId);
 const shuffle = (array) => { let currentIndex = array.length, randomIndex; while (currentIndex !== 0) { randomIndex = Math.floor(Math.random() * currentIndex); currentIndex--; [array[currentIndex], array[randomIndex]] = [array[randomIndex], array[currentIndex]]; } return array; };
+
+// --- MODIFICATION: New helper function to resolve a forfeit ---
+async function resolveForfeit(tableId, forfeitingPlayerName, reason) {
+    const table = state.getTableById(tableId);
+    if (!table || table.state === "Game Over") return;
+
+    console.log(`[${tableId}] Resolving forfeit for ${forfeitingPlayerName}. Reason: ${reason}`);
+
+    // Clear any active timer for this table
+    if (activeTimers[tableId]) {
+        clearInterval(activeTimers[tableId]);
+        delete activeTimers[tableId];
+    }
+    table.forfeiture = { targetPlayerName: null, timeLeft: null };
+
+    const forfeitingPlayer = Object.values(table.players).find(p => p.playerName === forfeitingPlayerName);
+    const remainingPlayers = Object.values(table.players).filter(p => !p.isSpectator && p.playerName !== forfeitingPlayerName);
+    
+    const tokenChanges = gameLogic.calculateForfeitPayout(table, forfeitingPlayerName);
+    
+    try {
+        const dbPromises = [];
+        // Update forfeiter
+        if (forfeitingPlayer) {
+            dbPromises.push(pool.query("UPDATE users SET losses = losses + 1 WHERE id = $1", [forfeitingPlayer.userId]));
+        }
+        // Update remaining players
+        remainingPlayers.forEach(player => {
+            const tokenGain = tokenChanges[player.playerName] || 0;
+            dbPromises.push(pool.query("UPDATE users SET tokens = tokens + $1, washes = washes + 1 WHERE id = $2", [tokenGain, player.userId]));
+        });
+        await Promise.all(dbPromises);
+    } catch (err) {
+        console.error(`Database error during forfeit resolution for table ${tableId}:`, err);
+    }
+
+    table.roundSummary = {
+        message: `${forfeitingPlayerName} has forfeited the game due to ${reason}. The game has ended.`,
+        isGameOver: true,
+        gameWinner: `Payout to remaining players.`,
+        finalScores: table.scores,
+        payouts: tokenChanges, // Add payout info to summary
+    };
+    table.state = "Game Over";
+    emitTableUpdate(tableId);
+    emitLobbyUpdate();
+}
+
 
 const createDbTables = async (dbPool) => {
     const userTableQuery = `
@@ -59,7 +103,6 @@ const createDbTables = async (dbPool) => {
     }
 };
 
-// --- SOCKET.IO AUTHENTICATION MIDDLEWARE ---
 io.use((socket, next) => {
     const token = socket.handshake.auth.token;
     if (!token) { return next(new Error("Authentication error: No token provided.")); }
@@ -70,7 +113,6 @@ io.use((socket, next) => {
     });
 });
 
-// --- MAIN SOCKET.IO CONNECTION HANDLER ---
 io.on("connection", (socket) => {
     console.log(`Socket connected for user: ${socket.user.username} (ID: ${socket.user.id})`);
     
@@ -82,11 +124,62 @@ io.on("connection", (socket) => {
             table.players[socket.userId].disconnected = false;
             table.players[socket.userId].socketId = socket.id;
             socket.join(table.tableId);
+
+            // --- MODIFICATION: Clear timeout timer on reconnect ---
+            if (table.forfeiture.targetPlayerName === socket.user.username) {
+                if (activeTimers[table.tableId]) {
+                    clearInterval(activeTimers[table.tableId]);
+                    delete activeTimers[table.tableId];
+                }
+                table.forfeiture = { targetPlayerName: null, timeLeft: null };
+                console.log(`[${table.tableId}] Cleared timeout for reconnected player ${socket.user.username}.`);
+            }
             emitTableUpdate(table.tableId);
         }
     }
 
     socket.emit("lobbyState", state.getLobbyState());
+
+    socket.on("forfeitGame", ({ tableId }) => {
+        const table = state.getTableById(tableId);
+        if (!table || !table.players[socket.user.id]) return;
+        resolveForfeit(tableId, socket.user.username, "voluntary forfeit");
+    });
+
+    socket.on("startTimeoutClock", ({ tableId, targetPlayerName }) => {
+        const table = state.getTableById(tableId);
+        if (!table || activeTimers[tableId] || !table.players[socket.user.id]) return;
+
+        const targetPlayer = Object.values(table.players).find(p => p.playerName === targetPlayerName);
+        if (!targetPlayer || !targetPlayer.disconnected) {
+            return socket.emit("error", "Cannot start timer: Player is not disconnected.");
+        }
+
+        console.log(`[${tableId}] Timeout clock started for ${targetPlayerName} by ${socket.user.username}.`);
+        table.forfeiture.targetPlayerName = targetPlayerName;
+        table.forfeiture.timeLeft = 120; // 2 minutes
+        
+        const timerId = setInterval(() => {
+            const currentTable = state.getTableById(tableId);
+            if (!currentTable) {
+                clearInterval(timerId);
+                delete activeTimers[tableId];
+                return;
+            }
+            currentTable.forfeiture.timeLeft -= 1;
+            if (currentTable.forfeiture.timeLeft <= 0) {
+                resolveForfeit(tableId, targetPlayerName, "timeout");
+            } else {
+                emitTableUpdate(tableId);
+            }
+        }, 1000);
+        activeTimers[tableId] = timerId;
+        emitTableUpdate(tableId);
+    });
+    
+    // ... (rest of the socket handlers: requestFreeToken, sacrificeToken, joinTable, etc.)
+    // Note: The existing 'disconnect' handler is sufficient and does not need changes for this feature.
+    // The 'leaveTable' handler is also correct as it only applies before a game is fully in progress.
 
     socket.on("requestFreeToken", async () => {
         try {

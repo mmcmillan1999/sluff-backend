@@ -17,6 +17,14 @@ function getInitialInsuranceState() {
     };
 }
 
+// --- MODIFICATION: Added initial state for forfeiture ---
+function getInitialForfeitureState() {
+    return {
+        targetPlayerName: null,
+        timeLeft: null,
+    };
+}
+
 function getInitialGameData(tableId, theme) {
     const themeIndex = THEMES.findIndex(t => t.id === theme.id);
     const baseCount = themeIndex > 0 ? THEMES.slice(0, themeIndex).reduce((acc, t) => acc + t.count, 0) : 0;
@@ -34,6 +42,7 @@ function getInitialGameData(tableId, theme) {
         capturedTricks: {}, roundSummary: null, revealedWidowForFrog: [], lastCompletedTrick: null,
         playersWhoPassedThisRound: [], playerMode: null, serverVersion: SERVER_VERSION,
         insurance: getInitialInsuranceState(),
+        forfeiture: getInitialForfeitureState(), // --- MODIFICATION ---
     };
 }
 
@@ -56,7 +65,9 @@ function initializeNewRoundState(table) {
         bidsMadeCount: 0, originalFrogBidderId: null, soloBidMadeAfterFrog: false, currentTrickCards: [],
         trickTurnPlayerName: null, tricksPlayedCount: 0, leadSuitCurrentTrick: null, trumpBroken: false,
         trickLeaderName: null, capturedTricks: {}, roundSummary: null, revealedWidowForFrog: [],
-        lastCompletedTrick: null, playersWhoPassedThisRound: [], insurance: getInitialInsuranceState(),
+        lastCompletedTrick: null, playersWhoPassedThisRound: [], 
+        insurance: getInitialInsuranceState(),
+        forfeiture: getInitialForfeitureState(), // --- MODIFICATION ---
     });
     table.playerOrderActive.forEach(pName => {
         if (pName && table.scores[pName] !== undefined) {
@@ -104,13 +115,12 @@ function getLobbyState() {
             .map(table => {
                 const allPlayers = Object.values(table.players);
                 const activePlayers = allPlayers.filter(p => !p.isSpectator);
-                // --- MODIFICATION: Add playerNames to the returned object ---
                 return {
                     tableId: table.tableId,
                     tableName: table.tableName,
                     state: table.state,
                     playerCount: activePlayers.length,
-                    playerNames: activePlayers.map(p => p.playerName) // Add this line
+                    playerNames: activePlayers.map(p => p.playerName)
                 };
             });
         return { ...theme, cost: TABLE_COSTS[theme.id] || 0, tables: themeTables };
