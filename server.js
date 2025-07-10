@@ -19,7 +19,7 @@ const io = new Server(server, {
   cors: { origin: "*", methods: ["GET", "POST"] },
 });
 let pool;
-let activeTimers = {}; // --- MODIFICATION: To store active timeout intervals ---
+let activeTimers = {};
 
 app.use(cors({ origin: "*" }));
 app.use(express.json());
@@ -32,14 +32,12 @@ const emitTableUpdate = (tableId) => {
 const getPlayerNameByUserId = (userId, table) => table?.players[userId]?.playerName || String(userId);
 const shuffle = (array) => { let currentIndex = array.length, randomIndex; while (currentIndex !== 0) { randomIndex = Math.floor(Math.random() * currentIndex); currentIndex--; [array[currentIndex], array[randomIndex]] = [array[randomIndex], array[currentIndex]]; } return array; };
 
-// --- MODIFICATION: New helper function to resolve a forfeit ---
 async function resolveForfeit(tableId, forfeitingPlayerName, reason) {
     const table = state.getTableById(tableId);
     if (!table || table.state === "Game Over") return;
 
     console.log(`[${tableId}] Resolving forfeit for ${forfeitingPlayerName}. Reason: ${reason}`);
 
-    // Clear any active timer for this table
     if (activeTimers[tableId]) {
         clearInterval(activeTimers[tableId]);
         delete activeTimers[tableId];
@@ -53,11 +51,9 @@ async function resolveForfeit(tableId, forfeitingPlayerName, reason) {
     
     try {
         const dbPromises = [];
-        // Update forfeiter
         if (forfeitingPlayer) {
             dbPromises.push(pool.query("UPDATE users SET losses = losses + 1 WHERE id = $1", [forfeitingPlayer.userId]));
         }
-        // Update remaining players
         remainingPlayers.forEach(player => {
             const tokenGain = tokenChanges[player.playerName] || 0;
             dbPromises.push(pool.query("UPDATE users SET tokens = tokens + $1, washes = washes + 1 WHERE id = $2", [tokenGain, player.userId]));
@@ -72,7 +68,7 @@ async function resolveForfeit(tableId, forfeitingPlayerName, reason) {
         isGameOver: true,
         gameWinner: `Payout to remaining players.`,
         finalScores: table.scores,
-        payouts: tokenChanges, // Add payout info to summary
+        payouts: tokenChanges,
     };
     table.state = "Game Over";
     emitTableUpdate(tableId);
@@ -125,7 +121,6 @@ io.on("connection", (socket) => {
             table.players[socket.userId].socketId = socket.id;
             socket.join(table.tableId);
 
-            // --- MODIFICATION: Clear timeout timer on reconnect ---
             if (table.forfeiture.targetPlayerName === socket.user.username) {
                 if (activeTimers[table.tableId]) {
                     clearInterval(activeTimers[table.tableId]);
@@ -139,6 +134,21 @@ io.on("connection", (socket) => {
     }
 
     socket.emit("lobbyState", state.getLobbyState());
+
+    // --- MODIFICATION: New handler to force a user data sync ---
+    socket.on("requestUserSync", async () => {
+        try {
+            const userResult = await pool.query("SELECT * FROM users WHERE id = $1", [socket.user.id]);
+            const updatedUser = userResult.rows[0];
+            if (updatedUser) {
+                delete updatedUser.password_hash;
+                socket.emit("updateUser", updatedUser);
+                console.log(`[SYNC] Sent updated user data to ${updatedUser.username}.`);
+            }
+        } catch(err) {
+            console.error(`Error during user sync for user ${socket.user.id}:`, err);
+        }
+    });
 
     socket.on("forfeitGame", ({ tableId }) => {
         const table = state.getTableById(tableId);
@@ -157,7 +167,7 @@ io.on("connection", (socket) => {
 
         console.log(`[${tableId}] Timeout clock started for ${targetPlayerName} by ${socket.user.username}.`);
         table.forfeiture.targetPlayerName = targetPlayerName;
-        table.forfeiture.timeLeft = 120; // 2 minutes
+        table.forfeiture.timeLeft = 120;
         
         const timerId = setInterval(() => {
             const currentTable = state.getTableById(tableId);
@@ -177,10 +187,6 @@ io.on("connection", (socket) => {
         emitTableUpdate(tableId);
     });
     
-    // ... (rest of the socket handlers: requestFreeToken, sacrificeToken, joinTable, etc.)
-    // Note: The existing 'disconnect' handler is sufficient and does not need changes for this feature.
-    // The 'leaveTable' handler is also correct as it only applies before a game is fully in progress.
-
     socket.on("requestFreeToken", async () => {
         try {
             const result = await pool.query(
