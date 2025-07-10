@@ -45,10 +45,9 @@ async function resolveForfeit(tableId, forfeitingPlayerName, reason) {
     table.forfeiture = { targetPlayerName: null, timeLeft: null };
 
     const forfeitingPlayer = Object.values(table.players).find(p => p.playerName === forfeitingPlayerName);
-    // --- MODIFICATION: This list now correctly filters out any other disconnected players ---
+    // --- MODIFICATION: This list now correctly includes disconnected players in the payout ---
     const remainingPlayers = Object.values(table.players).filter(p => 
         !p.isSpectator && 
-        !p.disconnected && 
         p.playerName !== forfeitingPlayerName
     );
     

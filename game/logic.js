@@ -21,9 +21,9 @@ const calculateCardPoints = (cardsArray) => {
 // --- CORE LOGIC FUNCTIONS ---
 
 function calculateForfeitPayout(table, forfeitingPlayerName) {
+    // --- MODIFICATION: A "remaining player" now includes those who are disconnected ---
     const remainingPlayers = Object.values(table.players).filter(p => 
         !p.isSpectator && 
-        !p.disconnected && 
         p.playerName !== forfeitingPlayerName
     );
 
@@ -47,7 +47,6 @@ function calculateForfeitPayout(table, forfeitingPlayerName) {
             const proportion = playerScore / totalScoreOfRemaining;
             const shareOfForfeit = proportion * forfeitedBuyIn;
             const totalPayout = tableBuyIn + shareOfForfeit;
-            
             payoutDetails[player.playerName] = {
                 buyInReturned: tableBuyIn,
                 forfeitShare: Math.round(shareOfForfeit * 100) / 100,
