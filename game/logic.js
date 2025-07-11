@@ -30,8 +30,8 @@ function calculateForfeitPayout(table, forfeitingPlayerName) {
     if (remainingPlayers.length === 0) return {};
 
     const tableBuyIn = TABLE_COSTS[table.theme] || 0;
-    const totalPayout = tableBuyIn * remainingPlayers.length; // All remaining players get their buy-in back
-    const forfeitShare = tableBuyIn / remainingPlayers.length; // The forfeited buy-in is split evenly
+    const totalPayout = tableBuyIn * remainingPlayers.length;
+    const forfeitShare = tableBuyIn / remainingPlayers.length;
 
     const payoutDetails = {};
     remainingPlayers.forEach(player => {
@@ -90,8 +90,7 @@ function transitionToPlayingPhase(table, io) {
     io.to(table.tableId).emit("gameState", table);
 }
 
-// --- MODIFICATION: This is the final refactored function ---
-async function calculateRoundScores(table, io, pool) { // Removed getPlayerNameByUserId from args
+async function calculateRoundScores(table, io, pool) {
     if (!table || !table.bidWinnerInfo) return;
 
     const { bidWinnerInfo, playerOrderActive, playerMode, scores, capturedTricks, widowDiscardsForFrogBidder, originalDealtWidow, insurance, theme, gameId } = table;
@@ -131,8 +130,8 @@ async function calculateRoundScores(table, io, pool) { // Removed getPlayerNameB
     }
 
     let roundMessage = "";
+    let insuranceHindsight = null;
     
-    // NOTE: Insurance score calculation remains in-memory as it doesn't involve tokens, only game points.
     if (insurance.dealExecuted) {
         const agreement = insurance.executedDetails.agreement;
         scores[agreement.bidderPlayerName] += agreement.bidderRequirement;
@@ -159,6 +158,61 @@ async function calculateRoundScores(table, io, pool) { // Removed getPlayerNameB
             roundMessage = `${bidWinnerName} failed. Loses ${totalPointsLost} points.`;
         }
     }
+
+    // --- THIS IS THE FIX: Re-adding the hindsight calculation ---
+    if (playerMode === 3) {
+        insuranceHindsight = {};
+        const defenders = playerOrderActive.filter(p => p !== bidWinnerName);
+        
+        const outcomeFromCards = {};
+        const scoreDifferenceFrom60 = bidderTotalCardPoints - 60;
+        const exchangeValue = Math.abs(scoreDifferenceFrom60) * currentBidMultiplier;
+        if (scoreDifferenceFrom60 > 0) {
+            outcomeFromCards[bidWinnerName] = exchangeValue * 2;
+            defenders.forEach(def => outcomeFromCards[def] = -exchangeValue);
+        } else if (scoreDifferenceFrom60 < 0) {
+            outcomeFromCards[bidWinnerName] = -(exchangeValue * 2);
+            defenders.forEach(def => outcomeFromCards[def] = exchangeValue);
+        } else {
+             playerOrderActive.forEach(p => outcomeFromCards[p] = 0);
+        }
+
+        const potentialOutcomeFromDeal = {};
+        const sumOfFinalOffers = Object.values(insurance.defenderOffers).reduce((sum, offer) => sum + offer, 0);
+        potentialOutcomeFromDeal[bidWinnerName] = sumOfFinalOffers;
+        const costPerDefenderForced = Math.round(insurance.bidderRequirement / defenders.length);
+        defenders.forEach(def => {
+            potentialOutcomeFromDeal[def] = -costPerDefenderForced;
+        });
+
+        const actualOutcomeFromDeal = {};
+        if (insurance.dealExecuted) {
+            const agreement = insurance.executedDetails.agreement;
+            actualOutcomeFromDeal[agreement.bidderPlayerName] = agreement.bidderRequirement;
+            for (const defName in agreement.defenderOffers) {
+                actualOutcomeFromDeal[defName] = -agreement.defenderOffers[defName];
+           }
+        }
+
+        playerOrderActive.forEach(pName => {
+            let actualPoints, potentialPoints;
+            if (insurance.dealExecuted) {
+                actualPoints = actualOutcomeFromDeal[pName];
+                potentialPoints = outcomeFromCards[pName];
+            } else {
+                actualPoints = outcomeFromCards[pName];
+                potentialPoints = potentialOutcomeFromDeal[pName];
+            }
+            
+            insuranceHindsight[pName] = {
+                actualPoints: actualPoints || 0,
+                actualReason: insurance.dealExecuted ? "Insurance Deal" : "Card Outcome",
+                potentialPoints: potentialPoints || 0,
+                potentialReason: insurance.dealExecuted ? "Played it Out" : "Taken Insurance Deal",
+                hindsightValue: (actualPoints || 0) - (potentialPoints || 0)
+            };
+        });
+    }
     
     let isGameOver = Object.values(scores).filter(s => typeof s === 'number').some(score => score <= 0);
     let gameWinnerName = null;
@@ -178,8 +232,6 @@ async function calculateRoundScores(table, io, pool) { // Removed getPlayerNameB
             const winnerPlayer = Object.values(table.players).find(p => p.playerName === gameWinnerName);
             const losers = Object.values(table.players).filter(p => p.playerName !== gameWinnerName && !p.isSpectator);
             
-            // --- NEW DB LOGIC ---
-            // Post transaction for the winner
             if (winnerPlayer) {
                 await transactionManager.postTransaction(pool, {
                     userId: winnerPlayer.userId, gameId: gameId, type: 'win_payout',
@@ -187,7 +239,6 @@ async function calculateRoundScores(table, io, pool) { // Removed getPlayerNameB
                 });
             }
 
-            // Update stats for all players
             const statPromises = [];
             if(winnerPlayer) {
                 statPromises.push(pool.query("UPDATE users SET wins = wins + 1 WHERE id = $1", [winnerPlayer.userId]));
@@ -197,10 +248,8 @@ async function calculateRoundScores(table, io, pool) { // Removed getPlayerNameB
             });
             await Promise.all(statPromises);
             
-            // Finalize the game history record
             await transactionManager.updateGameRecordOutcome(pool, gameId, outcomeMessage);
 
-            // Notify all players to sync their updated stats and balances
             Object.values(table.players).forEach(p => {
                 const playerSocket = io.sockets.sockets.get(p.socketId);
                 if (playerSocket) playerSocket.emit("requestUserSync");
@@ -214,7 +263,9 @@ async function calculateRoundScores(table, io, pool) { // Removed getPlayerNameB
     table.roundSummary = {
         message: roundMessage, finalScores: { ...scores }, isGameOver,
         gameWinner: gameWinnerName, dealerOfRoundId: table.dealer, widowForReveal,
-        insuranceDealWasMade: insurance.dealExecuted, insuranceDetails: insurance.dealExecuted ? insurance.executedDetails : null,
+        insuranceDealWasMade: insurance.dealExecuted, 
+        insuranceDetails: insurance.dealExecuted ? insurance.executedDetails : null,
+        insuranceHindsight: insuranceHindsight, // <-- Now correctly included
         allTricks: table.capturedTricks
     };
     
@@ -229,9 +280,6 @@ function prepareNextRound(table, io, helpers) {
 
     const allPlayerIds = Object.keys(table.players).filter(pId => !table.players[pId].isSpectator && !table.players[pId].disconnected).map(pId => Number(pId));
     if (allPlayerIds.length < 3) {
-        // Not enough players to continue, treat as a wash
-        // In a more advanced implementation, you might refund buy-ins here.
-        // For now, we reset the table.
         helpers.resetTable(table.tableId);
         return;
     };
