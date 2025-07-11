@@ -12,6 +12,7 @@ const gameLogic = require('./game/logic');
 const state = require('./game/gameState');
 const createAuthRoutes = require('./routes/auth');
 const createLeaderboardRoutes = require('./routes/leaderboard');
+const transactionManager = require('./db/transactionManager');
 
 const app = express();
 const server = http.createServer(app);
@@ -34,75 +35,76 @@ const shuffle = (array) => { let currentIndex = array.length, randomIndex; while
 
 async function resolveForfeit(tableId, forfeitingPlayerName, reason) {
     const table = state.getTableById(tableId);
-    if (!table || table.state === "Game Over") return;
+    if (!table || table.state === "Game Over" || !table.gameId) return;
 
     console.log(`[${tableId}] Resolving forfeit for ${forfeitingPlayerName}. Reason: ${reason}`);
-
-    if (activeTimers[tableId]) {
-        clearInterval(activeTimers[tableId]);
-        delete activeTimers[tableId];
-    }
-    table.forfeiture = { targetPlayerName: null, timeLeft: null };
-
-    const forfeitingPlayer = Object.values(table.players).find(p => p.playerName === forfeitingPlayerName);
-    // --- MODIFICATION: This list now correctly includes disconnected players in the payout ---
-    const remainingPlayers = Object.values(table.players).filter(p => 
-        !p.isSpectator && 
-        p.playerName !== forfeitingPlayerName
-    );
-    
-    const tokenChanges = gameLogic.calculateForfeitPayout(table, forfeitingPlayerName);
     
     try {
-        const dbPromises = [];
-        // Update forfeiter's stats
-        if (forfeitingPlayer) {
-            dbPromises.push(pool.query("UPDATE users SET losses = losses + 1 WHERE id = $1", [forfeitingPlayer.userId]));
+        if (activeTimers[tableId]) {
+            clearInterval(activeTimers[tableId]);
+            delete activeTimers[tableId];
         }
-        // Update remaining players' stats and tokens
+        table.forfeiture = { targetPlayerName: null, timeLeft: null };
+
+        const forfeitingPlayer = Object.values(table.players).find(p => p.playerName === forfeitingPlayerName);
+        const remainingPlayers = Object.values(table.players).filter(p => !p.isSpectator && p.playerName !== forfeitingPlayerName);
+        
+        const tokenChanges = gameLogic.calculateForfeitPayout(table, forfeitingPlayerName);
+        
+        const transactionPromises = [];
+        if (forfeitingPlayer) {
+            const tableCost = TABLE_COSTS[table.theme] || 0;
+            transactionPromises.push(transactionManager.postTransaction(pool, {
+                userId: forfeitingPlayer.userId, gameId: table.gameId, type: 'forfeit_loss',
+                amount: -tableCost, description: `Forfeited game on table ${table.tableName}`
+            }));
+        }
+
         remainingPlayers.forEach(player => {
-            if (tokenChanges[player.playerName]) {
-                const tokenGain = tokenChanges[player.playerName].totalGain || 0;
-                dbPromises.push(pool.query("UPDATE users SET tokens = tokens + $1, washes = washes + 1 WHERE id = $2", [tokenGain, player.userId]));
+            const payoutInfo = tokenChanges[player.playerName];
+            if (payoutInfo && payoutInfo.totalGain > 0) {
+                transactionPromises.push(transactionManager.postTransaction(pool, {
+                    userId: player.userId, gameId: table.gameId, type: 'forfeit_payout',
+                    amount: payoutInfo.totalGain, description: `Payout from ${forfeitingPlayerName}'s forfeit`
+                }));
             }
         });
-        await Promise.all(dbPromises);
+        await Promise.all(transactionPromises);
+
+        const statUpdatePromises = [];
+        if (forfeitingPlayer) {
+            statUpdatePromises.push(pool.query("UPDATE users SET losses = losses + 1 WHERE id = $1", [forfeitingPlayer.userId]));
+        }
+        remainingPlayers.forEach(player => {
+            statUpdatePromises.push(pool.query("UPDATE users SET washes = washes + 1 WHERE id = $1", [player.userId]));
+        });
+        await Promise.all(statUpdatePromises);
+        
+        const outcomeMessage = `${forfeitingPlayerName} has forfeited the game due to ${reason}.`;
+        await transactionManager.updateGameRecordOutcome(pool, table.gameId, outcomeMessage);
+
+        Object.values(table.players).forEach(p => io.sockets.sockets.get(p.socketId)?.emit("requestUserSync"));
+
+        table.roundSummary = {
+            message: `${outcomeMessage} The game has ended.`, isGameOver: true,
+            gameWinner: `Payout to remaining players.`, finalScores: table.scores, payouts: tokenChanges,
+        };
+        table.state = "Game Over";
+        emitTableUpdate(tableId);
+        emitLobbyUpdate();
+
     } catch (err) {
         console.error(`Database error during forfeit resolution for table ${tableId}:`, err);
     }
-
-    table.roundSummary = {
-        message: `${forfeitingPlayerName} has forfeited the game due to ${reason}. The game has ended.`,
-        isGameOver: true,
-        gameWinner: `Payout to remaining players.`,
-        finalScores: table.scores,
-        payouts: tokenChanges,
-    };
-    table.state = "Game Over";
-    emitTableUpdate(tableId);
-    emitLobbyUpdate();
 }
 
 
 const createDbTables = async (dbPool) => {
-    const userTableQuery = `
-        CREATE TABLE IF NOT EXISTS users (
-            id SERIAL PRIMARY KEY,
-            username VARCHAR(50) UNIQUE NOT NULL,
-            email VARCHAR(255) UNIQUE NOT NULL,
-            password_hash VARCHAR(255) NOT NULL,
-            created_at TIMESTAMPTZ DEFAULT NOW(),
-            tokens NUMERIC(10, 2) DEFAULT 8.00 NOT NULL,
-            wins INTEGER DEFAULT 0 NOT NULL,
-            losses INTEGER DEFAULT 0 NOT NULL,
-            washes INTEGER DEFAULT 0 NOT NULL
-        );
-    `;
     try {
-        await dbPool.query(userTableQuery);
-        console.log("Database 'users' table is ready.");
+        const result = await dbPool.query("SELECT 1 FROM users LIMIT 1;");
+        if (result) console.log("Database 'users' table is confirmed to exist.");
     } catch (err) {
-        console.error("Error creating database tables:", err);
+        console.error("Database tables check failed. Make sure you have run the schema script.", err);
         throw err;
     }
 };
@@ -145,10 +147,15 @@ io.on("connection", (socket) => {
 
     socket.on("requestUserSync", async () => {
         try {
-            const userResult = await pool.query("SELECT * FROM users WHERE id = $1", [socket.user.id]);
+            const userQuery = "SELECT id, username, email, created_at, wins, losses, washes, is_admin FROM users WHERE id = $1";
+            const userResult = await pool.query(userQuery, [socket.user.id]);
             const updatedUser = userResult.rows[0];
+
             if (updatedUser) {
-                delete updatedUser.password_hash;
+                const tokenQuery = "SELECT SUM(amount) AS current_tokens FROM transactions WHERE user_id = $1";
+                const tokenResult = await pool.query(tokenQuery, [socket.user.id]);
+                updatedUser.tokens = parseFloat(tokenResult.rows[0].current_tokens || 0).toFixed(2);
+
                 socket.emit("updateUser", updatedUser);
                 console.log(`[SYNC] Sent updated user data to ${updatedUser.username}.`);
             }
@@ -178,7 +185,7 @@ io.on("connection", (socket) => {
         
         const timerId = setInterval(() => {
             const currentTable = state.getTableById(tableId);
-            if (!currentTable) {
+            if (!currentTable || !currentTable.forfeiture.targetPlayerName) {
                 clearInterval(timerId);
                 delete activeTimers[tableId];
                 return;
@@ -196,15 +203,14 @@ io.on("connection", (socket) => {
     
     socket.on("requestFreeToken", async () => {
         try {
-            const result = await pool.query(
-                "UPDATE users SET tokens = tokens + 1 WHERE id = $1 RETURNING *",
-                [socket.user.id]
-            );
-            if (result.rows.length > 0) {
-                const updatedUser = result.rows[0];
-                delete updatedUser.password_hash;
-                socket.emit("updateUser", updatedUser);
-            }
+            await transactionManager.postTransaction(pool, {
+                userId: socket.user.id,
+                gameId: null,
+                type: 'free_token_mercy',
+                amount: 1,
+                description: 'Mercy token requested by user'
+            });
+            socket.emit("requestUserSync");
         } catch (err) {
             console.error("Error giving free token:", err);
             socket.emit("error", "Could not grant token.");
@@ -213,12 +219,14 @@ io.on("connection", (socket) => {
 
     socket.on("sacrificeToken", async () => {
         try {
-            const result = await pool.query("UPDATE users SET tokens = tokens - 1 WHERE id = $1 AND tokens > 0 RETURNING *", [socket.user.id]);
-            if (result.rows.length > 0) {
-                const updatedUser = result.rows[0];
-                delete updatedUser.password_hash;
-                socket.emit("updateUser", updatedUser);
-            }
+             await transactionManager.postTransaction(pool, {
+                userId: socket.user.id,
+                gameId: null,
+                type: 'admin_adjustment',
+                amount: -1,
+                description: 'User sacrificed a token to the gods of Sluff.'
+            });
+            socket.emit("requestUserSync");
         } catch (err) {
             console.error("Error sacrificing token:", err);
             socket.emit("error", "Could not sacrifice token.");
@@ -230,16 +238,15 @@ io.on("connection", (socket) => {
         if (!table) return socket.emit("error", "Table not found.");
         
         const { id, username } = socket.user;
-        
         const isPlayerAlreadyInGame = table.players[id];
         if (!isPlayerAlreadyInGame) {
             const tableCost = TABLE_COSTS[table.theme] || 0;
             try {
-                const userResult = await pool.query("SELECT tokens FROM users WHERE id = $1", [id]);
-                const userTokens = userResult.rows[0]?.tokens;
+                const tokenResult = await pool.query("SELECT SUM(amount) as tokens FROM transactions WHERE user_id = $1", [id]);
+                const userTokens = parseFloat(tokenResult.rows[0].tokens || 0);
 
                 if (userTokens < tableCost) {
-                    return socket.emit("error", `You need ${tableCost} tokens to join this table. You have ${userTokens}.`);
+                    return socket.emit("error", `You need ${tableCost} tokens to join. You have ${userTokens.toFixed(2)}.`);
                 }
             } catch (err) {
                 console.error("Database error during joinTable token check:", err);
@@ -262,9 +269,7 @@ io.on("connection", (socket) => {
         const canTakeSeat = activePlayersBeforeJoin.length < 4 && !table.gameStarted;
         
         table.players[id] = { 
-            userId: id, 
-            playerName: username, 
-            socketId: socket.id,
+            userId: id, playerName: username, socketId: socket.id,
             isSpectator: table.players[id]?.isSpectator ?? !canTakeSeat, 
             disconnected: false 
         };
@@ -292,57 +297,36 @@ io.on("connection", (socket) => {
         const tableCost = TABLE_COSTS[table.theme] || 0;
 
         try {
-            const playerCheckPromises = activePlayers.map(p => pool.query("SELECT tokens FROM users WHERE id = $1", [p.userId]));
-            const playerCheckResults = await Promise.all(playerCheckPromises);
+            const gameId = await transactionManager.createGameRecord(pool, table);
+            table.gameId = gameId;
 
-            for (let i = 0; i < activePlayers.length; i++) {
-                const player = activePlayers[i];
-                const dbPlayer = playerCheckResults[i].rows[0];
-                if (!dbPlayer || dbPlayer.tokens < tableCost) {
-                    const insufficientFundsMessage = `${player.playerName} does not have enough tokens to start the game (Cost: ${tableCost}).`;
-                    io.to(tableId).emit("error", insufficientFundsMessage);
-                    return;
-                }
-            }
-
-            const tokenDeductionPromises = activePlayers.map(p => 
-                pool.query("UPDATE users SET tokens = tokens - $1 WHERE id = $2", [tableCost, p.userId])
-            );
-            await Promise.all(tokenDeductionPromises);
-
-            const updateUserPromises = activePlayers.map(async (player) => {
-                const updatedUserResult = await pool.query("SELECT * FROM users WHERE id = $1", [player.userId]);
-                const updatedUser = updatedUserResult.rows[0];
-                if (updatedUser) {
-                    delete updatedUser.password_hash;
-                    const playerSocket = io.sockets.sockets.get(player.socketId);
-                    if (playerSocket) {
-                        playerSocket.emit("updateUser", updatedUser);
-                    }
-                }
+            const buyInPromises = activePlayers.map(player => {
+                return transactionManager.postTransaction(pool, {
+                    userId: player.userId, gameId: gameId, type: 'buy_in',
+                    amount: -tableCost, description: `Buy-in for game on table ${table.tableName}`
+                });
             });
-            await Promise.all(updateUserPromises);
+            await Promise.all(buyInPromises);
+            
+            activePlayers.forEach(player => {
+                const playerSocket = io.sockets.sockets.get(player.socketId);
+                if (playerSocket) playerSocket.emit("requestUserSync");
+            });
 
         } catch (err) {
-            console.error("Database error during startGame token check/deduction:", err);
-            socket.emit("error", "A server error occurred. Could not start game.");
+            console.error("Database error during startGame transaction processing:", err);
+            io.to(tableId).emit("error", "A server error occurred during buy-in. Could not start game.");
             return;
         }
         
         table.gameStarted = true;
         table.playerMode = activePlayers.length;
-
-        activePlayers.forEach(p => { 
-            if (table.scores[p.playerName] === undefined) table.scores[p.playerName] = 120; 
-        });
-
+        activePlayers.forEach(p => { if (table.scores[p.playerName] === undefined) table.scores[p.playerName] = 120; });
         if (table.playerMode === 3 && table.scores[PLACEHOLDER_ID] === undefined) {
             table.scores[PLACEHOLDER_ID] = 120;
         }
-
         const shuffledPlayerIds = shuffle(activePlayers.map(p => p.userId));
         table.dealer = shuffledPlayerIds[0];
-
         const dealerIndex = shuffledPlayerIds.indexOf(table.dealer);
         table.playerOrderActive = [];
         const numPlayers = shuffledPlayerIds.length;
@@ -352,12 +336,12 @@ io.on("connection", (socket) => {
             if (table.playerMode === 4 && playerId === table.dealer) continue;
             table.playerOrderActive.push(getPlayerNameByUserId(playerId, table));
         }
-
         state.initializeNewRoundState(table);
         table.state = "Dealing Pending";
         emitTableUpdate(tableId);
         emitLobbyUpdate();
     });
+
 
     socket.on("leaveTable", async ({ tableId }) => {
         const table = state.getTableById(tableId);
@@ -365,36 +349,20 @@ io.on("connection", (socket) => {
         if (!table || !table.players[userId]) return;
 
         const playerInfo = table.players[userId];
-        const playerIsSpectator = playerInfo.isSpectator;
-
-        const safeLeaveStates = ["Waiting for Players", "Ready to Start"];
-        const isEligibleForRefund = table.state === "Dealing Pending" && table.scores[playerInfo.playerName] === 120;
-
-        if (safeLeaveStates.includes(table.state) || playerIsSpectator) {
+        
+        const safeLeaveStates = ["Waiting for Players", "Ready to Start", "Game Over"];
+        if (safeLeaveStates.includes(table.state) || playerInfo.isSpectator) {
             delete table.players[userId];
-        } else if (isEligibleForRefund) {
-            const tableCost = TABLE_COSTS[table.theme] || 0;
-            if (tableCost > 0) {
-                try {
-                    await pool.query("UPDATE users SET tokens = tokens + $1 WHERE id = $2", [tableCost, userId]);
-                    const updatedUserResult = await pool.query("SELECT * FROM users WHERE id = $1", [userId]);
-                    const updatedUser = updatedUserResult.rows[0];
-                    if (updatedUser) {
-                        delete updatedUser.password_hash;
-                        socket.emit("updateUser", updatedUser);
-                    }
-                } catch (err) {
-                    console.error(`Error refunding tokens to user ${userId}:`, err);
-                }
-            }
-            delete table.players[userId];
-        } else {
+        } else if (table.gameId && table.gameStarted) {
             playerInfo.disconnected = true;
+        } else {
+            delete table.players[userId];
         }
         
         emitTableUpdate(tableId);
         emitLobbyUpdate();
     });
+
 
     socket.on("dealCards", ({ tableId }) => {
         const table = state.getTableById(tableId);
@@ -417,7 +385,7 @@ io.on("connection", (socket) => {
     socket.on("placeBid", ({ tableId, bid }) => {
         const table = state.getTableById(tableId);
         const { id, username } = socket.user;
-        if (!table || username !== table.biddingTurnPlayerName) return;
+        if (!table || username !== table.biddingTurnPlayername) return;
         
         const logicHelpers = { getPlayerNameByUserId, getTableById: state.getTableById, resetTable: (id) => state.resetTable(id, { emitTableUpdate, emitLobbyUpdate }), initializeNewRoundState: state.initializeNewRoundState, shuffle };
 
@@ -510,10 +478,10 @@ io.on("connection", (socket) => {
         if (table.state !== "Playing Phase" || username !== table.trickTurnPlayerName) return;
         const hand = table.hands[username];
         if (!hand || !hand.includes(card)) return;
-
+    
         const isLeading = table.currentTrickCards.length === 0;
         const playedSuit = gameLogic.getSuit(card);
-
+    
         if (isLeading) {
             if (playedSuit === table.trumpSuit && !table.trumpBroken) {
                 const isHandAllTrump = hand.every(c => gameLogic.getSuit(c) === table.trumpSuit);
@@ -528,26 +496,26 @@ io.on("connection", (socket) => {
                 if (hasTrump && playedSuit !== table.trumpSuit) return socket.emit("error", "You must play trump if you cannot follow suit.");
             }
         }
-
+    
         table.hands[username] = hand.filter(c => c !== card);
         table.currentTrickCards.push({ userId: id, playerName: username, card });
         if (isLeading) table.leadSuitCurrentTrick = playedSuit;
         if (playedSuit === table.trumpSuit) table.trumpBroken = true;
-
+    
         const expectedCardsInTrick = table.playerOrderActive.length;
         if (table.currentTrickCards.length === expectedCardsInTrick) {
             const winnerInfo = gameLogic.determineTrickWinner(table.currentTrickCards, table.leadSuitCurrentTrick, table.trumpSuit);
             table.lastCompletedTrick = { cards: [...table.currentTrickCards], winnerName: winnerInfo.playerName };
             table.tricksPlayedCount++;
             table.trickLeaderName = winnerInfo.playerName;
-
+    
             if (winnerInfo.playerName) {
                 if (!table.capturedTricks[winnerInfo.playerName]) table.capturedTricks[winnerInfo.playerName] = [];
                 table.capturedTricks[winnerInfo.playerName].push(table.currentTrickCards.map(p => p.card));
             }
             
             if (table.tricksPlayedCount === 11) {
-                gameLogic.calculateRoundScores(table, io, pool, getPlayerNameByUserId);
+                gameLogic.calculateRoundScores(table, io, pool);
             } else {
                 table.state = "TrickCompleteLinger";
                 emitTableUpdate(tableId);
@@ -634,48 +602,55 @@ io.on("connection", (socket) => {
             console.log(`[ADMIN] User ${socket.user.username} failed a token reset attempt.`);
             return socket.emit("error", "Incorrect secret for token reset.");
         }
-
         try {
             console.log(`[ADMIN] User ${socket.user.username} initiated a successful token reset.`);
-            await pool.query("UPDATE users SET tokens = 8");
-
+            const STARTING_TOKENS = 8.00;
+    
+            await pool.query("TRUNCATE TABLE transactions, game_history RESTART IDENTITY;");
+    
+            const usersResult = await pool.query("SELECT id FROM users;");
+            const allUsers = usersResult.rows;
+    
+            const startingBalancePromises = allUsers.map(user => {
+                return transactionManager.postTransaction(pool, {
+                    userId: user.id,
+                    gameId: null,
+                    type: 'admin_adjustment',
+                    amount: STARTING_TOKENS,
+                    description: `Season Reset - Starting Balance`
+                });
+            });
+            await Promise.all(startingBalancePromises);
+            
+            console.log(`Granted ${STARTING_TOKENS} tokens to ${allUsers.length} users.`);
+    
             const allSockets = await io.fetchSockets();
             for (const sock of allSockets) {
-                const userResult = await pool.query("SELECT * FROM users WHERE id = $1", [sock.userId]);
-                const updatedUser = userResult.rows[0];
-                if (updatedUser) {
-                    delete updatedUser.password_hash;
-                    sock.emit("updateUser", updatedUser);
-                }
+                sock.emit("requestUserSync");
             }
             emitLobbyUpdate();
-
+    
         } catch (err) {
             console.error("Error during token reset:", err);
             socket.emit("error", "Server error during token reset.");
         }
     });
 
+
     socket.on("disconnect", (reason) => {
         const userId = socket.userId;
         if (!userId) return;
-
         console.log(`Socket disconnected for user ID: ${userId}, Reason: ${reason}`);
-
         const table = Object.values(state.getAllTables()).find(t => t.players[userId]);
         if (table) {
             const playerInfo = table.players[userId];
-            if (playerInfo) {
+            if (playerInfo && table.gameStarted && !playerInfo.isSpectator) {
                 playerInfo.disconnected = true;
-                if (table.gameStarted && !playerInfo.isSpectator) {
-                    emitTableUpdate(table.tableId);
-                    emitLobbyUpdate();
-                } else {
-                    delete table.players[userId];
-                    emitTableUpdate(table.tableId);
-                    emitLobbyUpdate();
-                }
+            } else if (playerInfo) {
+                delete table.players[userId];
             }
+            emitTableUpdate(table.tableId);
+            emitLobbyUpdate();
         }
     });
 
