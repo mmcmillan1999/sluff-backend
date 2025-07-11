@@ -145,7 +145,6 @@ io.on("connection", (socket) => {
 
     socket.emit("lobbyState", state.getLobbyState());
 
-    // --- MODIFICATION: Removed 'is_admin' from the SELECT query ---
     socket.on("requestUserSync", async () => {
         try {
             const userQuery = "SELECT id, username, email, created_at, wins, losses, washes FROM users WHERE id = $1";
@@ -296,6 +295,10 @@ io.on("connection", (socket) => {
         if (activePlayers.length < 3) return socket.emit("error", "Need at least 3 players to start.");
 
         const tableCost = TABLE_COSTS[table.theme] || 0;
+        
+        // ** THE FIX IS HERE **
+        // Set playerMode *before* calling the database function
+        table.playerMode = activePlayers.length;
 
         try {
             const gameId = await transactionManager.createGameRecord(pool, table);
@@ -317,11 +320,12 @@ io.on("connection", (socket) => {
         } catch (err) {
             console.error("Database error during startGame transaction processing:", err);
             io.to(tableId).emit("error", "A server error occurred during buy-in. Could not start game.");
+            table.playerMode = null; 
             return;
         }
         
         table.gameStarted = true;
-        table.playerMode = activePlayers.length;
+        
         activePlayers.forEach(p => { if (table.scores[p.playerName] === undefined) table.scores[p.playerName] = 120; });
         if (table.playerMode === 3 && table.scores[PLACEHOLDER_ID] === undefined) {
             table.scores[PLACEHOLDER_ID] = 120;
