@@ -145,9 +145,10 @@ io.on("connection", (socket) => {
 
     socket.emit("lobbyState", state.getLobbyState());
 
+    // --- MODIFICATION: Removed 'is_admin' from the SELECT query ---
     socket.on("requestUserSync", async () => {
         try {
-            const userQuery = "SELECT id, username, email, created_at, wins, losses, washes, is_admin FROM users WHERE id = $1";
+            const userQuery = "SELECT id, username, email, created_at, wins, losses, washes FROM users WHERE id = $1";
             const userResult = await pool.query(userQuery, [socket.user.id]);
             const updatedUser = userResult.rows[0];
 
@@ -385,7 +386,7 @@ io.on("connection", (socket) => {
     socket.on("placeBid", ({ tableId, bid }) => {
         const table = state.getTableById(tableId);
         const { id, username } = socket.user;
-        if (!table || username !== table.biddingTurnPlayername) return;
+        if (!table || username !== table.biddingTurnPlayerName) return;
         
         const logicHelpers = { getPlayerNameByUserId, getTableById: state.getTableById, resetTable: (id) => state.resetTable(id, { emitTableUpdate, emitLobbyUpdate }), initializeNewRoundState: state.initializeNewRoundState, shuffle };
 
@@ -597,59 +598,54 @@ io.on("connection", (socket) => {
     });
 
     socket.on("resetAllTokens", async ({ secret }) => {
-    const correctSecret = "Ben_Celica_2479_Gines";
-    if (secret !== correctSecret) {
-        console.log(`[ADMIN] User ${socket.user.username} failed a token reset attempt.`);
-        return socket.emit("error", "Incorrect secret for token reset.");
-    }
-    try {
-        console.log(`[ADMIN] User ${socket.user.username} initiated a successful token reset.`);
-        const STARTING_TOKENS = 8.00;
-
-        // Step 1: Clear all past game and transaction history
-        await pool.query("TRUNCATE TABLE transactions, game_history RESTART IDENTITY;");
-
-        // Step 2: Get all registered users
-        const usersResult = await pool.query("SELECT id FROM users;");
-        const allUsers = usersResult.rows;
-
-        // Step 3: Create a starting balance transaction for every user
-        const startingBalancePromises = allUsers.map(user => {
-            return transactionManager.postTransaction(pool, {
-                userId: user.id,
-                gameId: null,
-                type: 'admin_adjustment',
-                amount: STARTING_TOKENS,
-                description: `Season Reset - Starting Balance`
-            });
-        });
-        await Promise.all(startingBalancePromises);
-        console.log(`Granted ${STARTING_TOKENS} tokens to ${allUsers.length} users.`);
-
-        // Step 4: Tell all connected clients to sync their new state
-        const allSockets = await io.fetchSockets();
-        for (const sock of allSockets) {
-            // For each connected socket, fetch their full user profile and new token balance
-            const userQuery = "SELECT id, username, email, created_at, wins, losses, washes, is_admin FROM users WHERE id = $1";
-            const userResult = await pool.query(userQuery, [sock.userId]);
-            const updatedUser = userResult.rows[0];
-
-            if (updatedUser) {
-                const tokenQuery = "SELECT SUM(amount) AS current_tokens FROM transactions WHERE user_id = $1";
-                const tokenResult = await pool.query(tokenQuery, [sock.userId]);
-                updatedUser.tokens = parseFloat(tokenResult.rows[0].current_tokens || 0).toFixed(2);
-                
-                // Directly emit the 'updateUser' event with the new data
-                sock.emit("updateUser", updatedUser);
-            }
+        const correctSecret = "Ben_Celica_2479_Gines";
+        if (secret !== correctSecret) {
+            console.log(`[ADMIN] User ${socket.user.username} failed a token reset attempt.`);
+            return socket.emit("error", "Incorrect secret for token reset.");
         }
-        emitLobbyUpdate();
-
-    } catch (err) {
-        console.error("Error during token reset:", err);
-        socket.emit("error", "Server error during token reset.");
-    }
-});
+        try {
+            console.log(`[ADMIN] User ${socket.user.username} initiated a successful token reset.`);
+            const STARTING_TOKENS = 8.00;
+    
+            await pool.query("TRUNCATE TABLE transactions, game_history RESTART IDENTITY;");
+    
+            const usersResult = await pool.query("SELECT id FROM users;");
+            const allUsers = usersResult.rows;
+    
+            const startingBalancePromises = allUsers.map(user => {
+                return transactionManager.postTransaction(pool, {
+                    userId: user.id,
+                    gameId: null,
+                    type: 'admin_adjustment',
+                    amount: STARTING_TOKENS,
+                    description: `Season Reset - Starting Balance`
+                });
+            });
+            await Promise.all(startingBalancePromises);
+            
+            console.log(`Granted ${STARTING_TOKENS} tokens to ${allUsers.length} users.`);
+    
+            const allSockets = await io.fetchSockets();
+            for (const sock of allSockets) {
+                const userQuery = "SELECT id, username, email, created_at, wins, losses, washes FROM users WHERE id = $1";
+                const userResult = await pool.query(userQuery, [sock.userId]);
+                const updatedUser = userResult.rows[0];
+    
+                if (updatedUser) {
+                    const tokenQuery = "SELECT SUM(amount) AS current_tokens FROM transactions WHERE user_id = $1";
+                    const tokenResult = await pool.query(tokenQuery, [sock.userId]);
+                    updatedUser.tokens = parseFloat(tokenResult.rows[0].current_tokens || 0).toFixed(2);
+                    
+                    sock.emit("updateUser", updatedUser);
+                }
+            }
+            emitLobbyUpdate();
+    
+        } catch (err) {
+            console.error("Error during token reset:", err);
+            socket.emit("error", "Server error during token reset.");
+        }
+    });
 
 
     socket.on("disconnect", (reason) => {
