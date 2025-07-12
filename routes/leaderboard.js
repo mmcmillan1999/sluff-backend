@@ -6,10 +6,10 @@ module.exports = function(pool) {
 
     router.get('/', async (req, res) => {
         try {
-            // --- MODIFICATION: Add u.is_admin to the SELECT query ---
+            // --- MODIFICATION: Corrected the JOIN condition and GROUP BY clause ---
             const query = `
                 SELECT 
-                    u.user_id,
+                    u.id as user_id,
                     u.username, 
                     u.email, 
                     u.wins, 
@@ -20,13 +20,13 @@ module.exports = function(pool) {
                 FROM 
                     users u
                 LEFT JOIN 
-                    transactions t ON u.user_id = t.user_id
+                    transactions t ON u.id = t.user_id
                 GROUP BY 
-                    u.user_id
+                    u.id, u.username, u.email, u.wins, u.losses, u.washes, u.is_admin
                 ORDER BY 
                     tokens DESC;
             `;
-            const [rows] = await pool.query(query);
+            const { rows } = await pool.query(query);
             res.json(rows);
         } catch (error) {
             console.error("Error fetching leaderboard data:", error);

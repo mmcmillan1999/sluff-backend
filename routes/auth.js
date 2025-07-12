@@ -12,15 +12,16 @@ module.exports = function(pool, bcrypt, jwt) {
                 return res.status(400).json({ message: "Username, email, and password are required." });
             }
             const hashedPassword = await bcrypt.hash(password, 10);
-            const insertQuery = 'INSERT INTO users (username, email, password_hash) VALUES (?, ?, ?)';
+            
+            // --- MODIFICATION: Using $1, $2, $3 placeholders for PostgreSQL ---
+            const insertQuery = 'INSERT INTO users (username, email, password_hash) VALUES ($1, $2, $3)';
             await pool.query(insertQuery, [username, email, hashedPassword]);
+            
             res.status(201).json({ message: "User registered successfully!" });
         } catch (error) {
-            if (error.code === 'ER_DUP_ENTRY') {
-                return res.status(409).json({ message: 'Email or username already exists.' });
-            }
             console.error("Registration error:", error);
-            res.status(500).json({ message: "Internal server error during registration." });
+            const detailedErrorMessage = error.message || "An unknown database error occurred.";
+            res.status(500).json({ message: detailedErrorMessage });
         }
     });
 
@@ -32,32 +33,35 @@ module.exports = function(pool, bcrypt, jwt) {
                 return res.status(400).json({ message: "Email and password are required." });
             }
 
-            // --- MODIFICATION 1 of 3: Add is_admin to the SELECT query ---
-            const userQuery = 'SELECT user_id, username, password_hash, tokens, is_admin FROM users WHERE email = ?';
-            const [users] = await pool.query(userQuery, [email]);
+            // Using $1 for PostgreSQL
+            const userQuery = 'SELECT id, username, password_hash, is_admin FROM users WHERE email = $1';
+            const userResult = await pool.query(userQuery, [email]);
 
-            if (users.length === 0) {
+            if (userResult.rows.length === 0) {
                 return res.status(401).json({ message: "Invalid credentials." });
             }
 
-            const user = users[0];
+            const user = userResult.rows[0];
             const isPasswordValid = await bcrypt.compare(password, user.password_hash);
 
             if (!isPasswordValid) {
                 return res.status(401).json({ message: "Invalid credentials." });
             }
 
-            // --- MODIFICATION 2 of 3: Add is_admin to the JWT payload ---
-            const payload = { id: user.user_id, username: user.username, is_admin: user.is_admin };
+            // Using $1 for PostgreSQL
+            const tokenQuery = "SELECT SUM(amount) AS tokens FROM transactions WHERE user_id = $1";
+            const tokenResult = await pool.query(tokenQuery, [user.id]);
+            const tokens = parseFloat(tokenResult.rows[0].tokens || 0).toFixed(2);
+
+            const payload = { id: user.id, username: user.username, is_admin: user.is_admin };
             const token = jwt.sign(payload, process.env.JWT_SECRET, { expiresIn: '1d' });
 
             res.json({
                 token,
-                // --- MODIFICATION 3 of 3: Add is_admin to the user object ---
                 user: {
-                    id: user.user_id,
+                    id: user.id,
                     username: user.username,
-                    tokens: user.tokens,
+                    tokens: tokens,
                     is_admin: user.is_admin
                 }
             });
