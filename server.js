@@ -6,13 +6,17 @@ const cors =require("cors");
 const { Server } = require("socket.io");
 const { Pool } = require("pg");
 const jwt = require("jsonwebtoken");
+const bcrypt = require('bcrypt');
 
-const { SUITS, BID_HIERARCHY, PLACEHOLDER_ID, deck, TABLE_COSTS } = require('./game/constants');
+const { SUITS, BID_HIERARCHY, PLACEHOLDER_ID, deck, TABLE_COSTS, SERVER_VERSION } = require('./game/constants');
 const gameLogic = require('./game/logic');
 const state = require('./game/gameState');
 const createAuthRoutes = require('./routes/auth');
 const createLeaderboardRoutes = require('./routes/leaderboard');
+const createAdminRoutes = require('./routes/admin');
 const transactionManager = require('./db/transactionManager');
+const createDbTables = require('./db/createTables');
+
 
 const app = express();
 const server = http.createServer(app);
@@ -25,13 +29,51 @@ let activeTimers = {};
 app.use(cors({ origin: "*" }));
 app.use(express.json());
 
-const emitLobbyUpdate = () => io.emit("lobbyState", state.getLobbyState());
+const emitLobbyUpdate = () => {
+    // console.log("Emitting lobby update to all clients.");
+    io.emit("lobbyState", state.getLobbyState());
+};
+
 const emitTableUpdate = (tableId) => {
     const table = state.getTableById(tableId);
-    if (table) io.to(tableId).emit("gameState", table);
+    if (table) {
+        // console.log(`Emitting table update for tableId: ${tableId}`);
+        io.to(tableId).emit("gameState", table);
+    } else {
+        // console.log(`Attempted to emit update for non-existent tableId: ${tableId}`);
+    }
 };
-const getPlayerNameByUserId = (userId, table) => table?.players[userId]?.playerName || String(userId);
-const shuffle = (array) => { let currentIndex = array.length, randomIndex; while (currentIndex !== 0) { randomIndex = Math.floor(Math.random() * currentIndex); currentIndex--; [array[currentIndex], array[randomIndex]] = [array[randomIndex], array[currentIndex]]; } return array; };
+
+const getPlayerNameByUserId = (userId, table) => {
+    if (!table || !table.players || !table.players[userId]) {
+        // console.log(`Could not find player name for userId: ${userId} in the provided table.`);
+        return String(userId);
+    }
+    return table.players[userId].playerName;
+};
+
+const shuffle = (array) => {
+    let currentIndex = array.length, randomIndex;
+    while (currentIndex !== 0) {
+        randomIndex = Math.floor(Math.random() * currentIndex);
+        currentIndex--;
+        [array[currentIndex], array[randomIndex]] = [
+            array[randomIndex], array[currentIndex]];
+    }
+    return array;
+};
+
+const dealCards = (players) => {
+    const shuffledDeck = shuffle([...deck]);
+    const hands = {};
+    const widow = [];
+    players.forEach(p => hands[p] = []);
+    for (let i = 0; i < 33; i++) {
+        hands[players[i % 3]].push(shuffledDeck.pop());
+    }
+    widow.push(...shuffledDeck);
+    return { hands, widow };
+};
 
 async function resolveForfeit(tableId, forfeitingPlayerName, reason) {
     const table = state.getTableById(tableId);
@@ -99,30 +141,21 @@ async function resolveForfeit(tableId, forfeitingPlayerName, reason) {
 }
 
 
-const createDbTables = async (dbPool) => {
-    try {
-        const result = await dbPool.query("SELECT 1 FROM users LIMIT 1;");
-        if (result) console.log("Database 'users' table is confirmed to exist.");
-    } catch (err) {
-        console.error("Database tables check failed. Make sure you have run the schema script.", err);
-        throw err;
-    }
-};
-
 io.use((socket, next) => {
     const token = socket.handshake.auth.token;
     if (!token) { return next(new Error("Authentication error: No token provided.")); }
     jwt.verify(token, process.env.JWT_SECRET, (err, user) => {
         if (err) { return next(new Error("Authentication error: Invalid token.")); }
         socket.user = user;
+        socket.userId = user.id; 
+        socket.username = user.username;
+        socket.is_admin = user.is_admin;
         next();
     });
 });
 
 io.on("connection", (socket) => {
     console.log(`Socket connected for user: ${socket.user.username} (ID: ${socket.user.id})`);
-    
-    socket.userId = socket.user.id; 
 
     for (const table of Object.values(state.getAllTables())) {
         if (table.players[socket.userId]?.disconnected) {
@@ -147,7 +180,7 @@ io.on("connection", (socket) => {
 
     socket.on("requestUserSync", async () => {
         try {
-            const userQuery = "SELECT id, username, email, created_at, wins, losses, washes FROM users WHERE id = $1";
+            const userQuery = "SELECT id, username, email, created_at, wins, losses, washes, is_admin FROM users WHERE id = $1";
             const userResult = await pool.query(userQuery, [socket.user.id]);
             const updatedUser = userResult.rows[0];
 
@@ -296,8 +329,6 @@ io.on("connection", (socket) => {
 
         const tableCost = TABLE_COSTS[table.theme] || 0;
         
-        // ** THE FIX IS HERE **
-        // Set playerMode *before* calling the database function
         table.playerMode = activePlayers.length;
 
         try {
@@ -687,11 +718,16 @@ server.listen(PORT, async () => {
     await pool.connect();
     console.log("✅ Database connection successful.");
     await createDbTables(pool);
-    const authRoutes = createAuthRoutes(pool);
+    
+    // Setup routes
+    const authRoutes = createAuthRoutes(pool, bcrypt, jwt);
     app.use('/api/auth', authRoutes);
 
     const leaderboardRoutes = createLeaderboardRoutes(pool);
     app.use('/api/leaderboard', leaderboardRoutes);
+
+    const adminRouter = createAdminRoutes(pool);
+    app.use('/api/admin', adminRouter);
 
     state.initializeGameTables();
   } catch (err) {

@@ -1,0 +1,29 @@
+Onboarding Prompt 4: Our Workflow & Rules of Engagement
+
+This is the final step of the onboarding process. This document outlines the tools we use and the best way for us to work together.
+
+Our Technical Stack
+To give you context on our development and deployment environment, here are the primary tools we use:
+
+Code Editor: VS Code
+
+Version Control: Git (with repositories hosted on GitHub)
+
+Frontend Deployment: Netlify
+
+Backend Deployment: Render
+
+Database Management: DBeaver
+
+You do not need to interact with these tools directly, but understanding this stack will help you provide more relevant suggestions. If development requires more tables, you may end up walking me through each setup step.
+
+Rules of Engagement
+To ensure our collaboration is as efficient as possible, please adhere to the following rules:
+
+Seek Clarity on Ambiguity: I am relatively new to coding. If my instructions are ever ambiguous or unclear, you must ask for clarification before proceeding. Do not guess at implementation details, variable names, or database table names.
+
+Provide Complete Files: Whenever you are asked to write or modify code, please provide the complete file, even for a single-line change. Do not provide snippets for me to place. This helps avoid integration errors.
+
+Acknowledge and Confirm: Before you provide a solution, briefly acknowledge the key goals of my prompt to confirm your understanding.
+
+If you understand and agree to these rules of engagement, please let me know that you are ready for your first real instruction of the day.

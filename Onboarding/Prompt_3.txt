@@ -1,0 +1,26 @@
+Onboarding Prompt 3: Strategic Project Analysis
+
+Goal:
+Please perform a strategic analysis of the project by completing the following steps. This will help us align on the current state of the project and define our next priorities.
+
+Required Files for Analysis:
+
+frontend_context.txt
+
+backend_context.txt
+
+Project_Roadmap_Prompt_3.txt
+
+Analysis Steps:
+
+Analyze the Roadmap.
+Compare the features listed as complete ([x]) in the Project_Roadmap_Prompt_3.txt document against the code provided in the frontend_context.txt and backend_context.txt files to verify their implementation.
+
+Identify Completed Gaps.
+Based on your code analysis, identify and list any significant features that are implemented in the codebase but are not yet marked as complete in the roadmap. This will help us update our documentation.
+
+Assess Current Progress.
+Review the tasks listed under Phase 3 (Alpha Testing) in the roadmap. Based on the code, provide an assessment of which tasks appear to be Partially Implemented, Fully Implemented, or Not Started.
+
+Provide Strategic Recommendations.
+With the long-term goal of making this a fun and profitable game, suggest any additions or reprioritizations to the roadmap. Frame your suggestions to help build a world-class game designed for player engagement and future revenue.
