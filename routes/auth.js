@@ -13,7 +13,6 @@ module.exports = function(pool, bcrypt, jwt) {
             }
             const hashedPassword = await bcrypt.hash(password, 10);
             
-            // --- MODIFICATION: Insert user and grant starting tokens in a single flow ---
             // Step 1: Insert the new user and get their ID back
             const insertUserQuery = 'INSERT INTO users (username, email, password_hash) VALUES ($1, $2, $3) RETURNING id';
             const userResult = await pool.query(insertUserQuery, [username, email, hashedPassword]);
@@ -21,8 +20,9 @@ module.exports = function(pool, bcrypt, jwt) {
 
             // Step 2: Create the initial transaction for the starting 8 tokens
             const startingTokens = 8.00;
-            const transactionType = 'starting_balance';
-            const description = 'Initial starting tokens';
+            // --- MODIFICATION: Changed to a valid ENUM value ---
+            const transactionType = 'admin_adjustment'; 
+            const description = 'New user starting balance';
             const insertTransactionQuery = 'INSERT INTO transactions (user_id, amount, transaction_type, description) VALUES ($1, $2, $3, $4)';
             await pool.query(insertTransactionQuery, [newUserId, startingTokens, transactionType, description]);
             
