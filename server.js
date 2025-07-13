@@ -736,8 +736,9 @@ io.on("connection", (socket) => {
         }
     });
 
-    socket.on("resetGame", ({ tableId }) => {
-        state.resetTable(tableId, { emitTableUpdate, emitLobbyUpdate });
+    socket.on("resetGame", async ({ tableId }) => {
+        // FIX: Await the async function and pass the database pool
+        await state.resetTable(tableId, pool, { emitTableUpdate, emitLobbyUpdate });
     });
 });
 

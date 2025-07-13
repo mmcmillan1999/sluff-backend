@@ -17,7 +17,6 @@ function getInitialInsuranceState() {
     };
 }
 
-// --- MODIFICATION: Added initial state for forfeiture ---
 function getInitialForfeitureState() {
     return {
         targetPlayerName: null,
@@ -42,7 +41,9 @@ function getInitialGameData(tableId, theme) {
         capturedTricks: {}, roundSummary: null, revealedWidowForFrog: [], lastCompletedTrick: null,
         playersWhoPassedThisRound: [], playerMode: null, serverVersion: SERVER_VERSION,
         insurance: getInitialInsuranceState(),
-        forfeiture: getInitialForfeitureState(), // --- MODIFICATION ---
+        forfeiture: getInitialForfeitureState(),
+        // FIX: Ensure playerTokens is initialized
+        playerTokens: {},
     };
 }
 
@@ -67,7 +68,7 @@ function initializeNewRoundState(table) {
         trickLeaderName: null, capturedTricks: {}, roundSummary: null, revealedWidowForFrog: [],
         lastCompletedTrick: null, playersWhoPassedThisRound: [], 
         insurance: getInitialInsuranceState(),
-        forfeiture: getInitialForfeitureState(), // --- MODIFICATION ---
+        forfeiture: getInitialForfeitureState(),
     });
     table.playerOrderActive.forEach(pName => {
         if (pName && table.scores[pName] !== undefined) {
@@ -76,7 +77,8 @@ function initializeNewRoundState(table) {
     });
 }
 
-function resetTable(tableId, emitters) {
+// FIX: The entire resetTable function is updated to be async and to correctly handle state.
+async function resetTable(tableId, pool, emitters) {
     const { emitTableUpdate, emitLobbyUpdate } = emitters;
     const table = tables[tableId];
     if (!table) return;
@@ -85,21 +87,54 @@ function resetTable(tableId, emitters) {
     const themeId = table.theme;
     const theme = THEMES.find(t => t.id === themeId) || { id: 'default', name: 'Default' };
     
+    // Create a fresh table state
     tables[tableId] = getInitialGameData(tableId, theme);
+    const newTable = tables[tableId];
 
     const activePlayerNames = [];
+    const playerIdsToKeep = [];
     for (const userId in originalPlayers) {
         const playerInfo = originalPlayers[userId];
-        tables[tableId].players[userId] = { ...playerInfo, isSpectator: false, disconnected: playerInfo.disconnected };
-        tables[tableId].scores[playerInfo.playerName] = 120;
-        if (!playerInfo.isSpectator) {
-            activePlayerNames.push(playerInfo.playerName);
+        // Only keep players who are not disconnected
+        if (!playerInfo.disconnected) {
+            newTable.players[userId] = { ...playerInfo, isSpectator: false };
+            newTable.scores[playerInfo.playerName] = 120;
+            if (!playerInfo.isSpectator) {
+                activePlayerNames.push(playerInfo.playerName);
+                playerIdsToKeep.push(playerInfo.userId);
+            }
         }
     }
-    tables[tableId].playerOrderActive = activePlayerNames;
-    tables[tableId].gameStarted = true;
-    tables[tableId].playerMode = activePlayerNames.length;
-    tables[tableId].state = activePlayerNames.length >= 3 ? "Ready to Start" : "Waiting for Players";
+    
+    newTable.playerOrderActive = activePlayerNames;
+    // FIX: gameStarted must be false. The game is ready, but it has not started.
+    newTable.gameStarted = false; 
+    newTable.playerMode = activePlayerNames.length;
+    newTable.state = activePlayerNames.length >= 3 ? "Ready to Start" : "Waiting for Players";
+
+    // FIX: Re-fetch and attach token balances for the remaining players.
+    try {
+        if (playerIdsToKeep.length > 0) {
+            const tokenQuery = `SELECT user_id, SUM(amount) as tokens FROM transactions WHERE user_id = ANY($1::int[]) GROUP BY user_id;`;
+            const tokenResult = await pool.query(tokenQuery, [playerIdsToKeep]);
+            
+            const playerTokens = {};
+            const userIdToNameMap = Object.values(newTable.players).reduce((acc, player) => {
+                acc[player.userId] = player.playerName;
+                return acc;
+            }, {});
+
+            tokenResult.rows.forEach(row => {
+                const playerName = userIdToNameMap[row.user_id];
+                if (playerName) {
+                    playerTokens[playerName] = parseFloat(row.tokens || 0).toFixed(2);
+                }
+            });
+            newTable.playerTokens = playerTokens;
+        }
+    } catch (err) {
+        console.error(`Error fetching tokens during table reset for table ${tableId}:`, err);
+    }
 
     emitTableUpdate(tableId);
     emitLobbyUpdate();
