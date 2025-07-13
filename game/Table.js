@@ -307,11 +307,9 @@ class Table {
     updateInsuranceSetting(userId, settingType, value) {
         const player = this.players[userId];
         if (!player || !this.insurance.isActive || this.insurance.dealExecuted) return;
-        
         const multiplier = this.insurance.bidMultiplier;
         const parsedValue = parseInt(value, 10);
         if (isNaN(parsedValue)) return;
-
         if (settingType === 'bidderRequirement' && player.playerName === this.insurance.bidderPlayerName) {
             const minReq = -120 * multiplier; const maxReq = 120 * multiplier;
             if (parsedValue >= minReq && parsedValue <= maxReq) this.insurance.bidderRequirement = parsedValue;
@@ -319,7 +317,6 @@ class Table {
             const minOffer = -60 * multiplier; const maxOffer = 60 * multiplier;
             if (parsedValue >= minOffer && parsedValue <= maxOffer) this.insurance.defenderOffers[player.playerName] = parsedValue;
         }
-
         const { bidderRequirement, defenderOffers } = this.insurance;
         if (bidderRequirement <= Object.values(defenderOffers || {}).reduce((sum, offer) => sum + (offer || 0), 0)) {
             this.insurance.dealExecuted = true;
@@ -357,7 +354,9 @@ class Table {
     async submitDrawVote(userId, vote) {
         const player = this.players[userId];
         if (!player || !this.drawRequest.isActive || !['wash', 'split', 'no'].includes(vote) || this.drawRequest.votes[player.playerName] !== null) return;
+        
         this.drawRequest.votes[player.playerName] = vote;
+    
         if (vote === 'no') {
             clearInterval(this.internalTimers.draw);
             this.drawRequest.isActive = false;
@@ -365,12 +364,60 @@ class Table {
             this._emitUpdate();
             return;
         }
+    
         const allVotes = Object.values(this.drawRequest.votes);
-        if (allVotes.every(v => v !== null)) {
-            clearInterval(this.internalTimers.draw);
-            this.drawRequest.isActive = false;
-            // ... (rest of the draw logic remains the same)
-        } else {
+        if (!allVotes.every(v => v !== null)) {
+            this._emitUpdate(); // Just update the votes, don't resolve yet
+            return;
+        }
+
+        // --- All votes are in, resolve the draw ---
+        clearInterval(this.internalTimers.draw);
+        this.drawRequest.isActive = false;
+        
+        try {
+            const voteCounts = allVotes.reduce((acc, v) => { acc[v] = (acc[v] || 0) + 1; return acc; }, {});
+            const tableCost = TABLE_COSTS[this.theme] || 0;
+            const activePlayers = Object.values(this.players).filter(p => !p.isSpectator);
+            let outcomeMessage = "Draw resolved.";
+            const transactionPromises = [];
+    
+            if (voteCounts.wash === activePlayers.length) {
+                outcomeMessage = "All players agreed to a wash. All buy-ins returned.";
+                activePlayers.forEach(p => {
+                    transactionPromises.push(transactionManager.postTransaction(this.pool, { userId: p.userId, gameId: this.gameId, type: 'wash_payout', amount: tableCost, description: `Draw Outcome: Wash` }));
+                });
+            } else if (voteCounts.wash > 0 && voteCounts.split > 0) {
+                outcomeMessage = "A split was agreed upon. Payouts calculated by score.";
+                const payoutResult = gameLogic.calculateDrawSplitPayout(this);
+                if (payoutResult && payoutResult.payouts) {
+                    for (const playerName in payoutResult.payouts) {
+                        const pData = payoutResult.payouts[playerName];
+                        transactionPromises.push(transactionManager.postTransaction(this.pool, { userId: pData.userId, gameId: this.gameId, type: 'win_payout', amount: pData.totalReturn, description: `Draw Outcome: Split` }));
+                    }
+                }
+            } else { // Default to wash if there's no clear majority or only split votes etc.
+                outcomeMessage = "The draw resulted in a wash. All buy-ins returned.";
+                activePlayers.forEach(p => {
+                    transactionPromises.push(transactionManager.postTransaction(this.pool, { userId: p.userId, gameId: this.gameId, type: 'wash_payout', amount: tableCost, description: `Draw Outcome: Wash (Default)` }));
+                });
+            }
+            
+            await Promise.all(transactionPromises);
+            await transactionManager.updateGameRecordOutcome(this.pool, this.gameId, outcomeMessage);
+    
+            this.state = "Game Over";
+            this.roundSummary = { message: outcomeMessage, isGameOver: true, finalScores: this.scores };
+            this._emitUpdate();
+            this.emitLobbyUpdateCallback();
+
+            // Automatically reset the table after showing the summary
+            this.internalTimers.drawReset = setTimeout(() => this.reset(), 10000);
+
+        } catch (error) {
+            console.error(`[${this.tableId}] Error resolving draw vote:`, error);
+            this.io.to(this.tableId).emit("notification", { message: `A server error occurred resolving the draw. Resuming game.` });
+            this.drawRequest = this._getInitialDrawRequestState(); // Reset the draw state
             this._emitUpdate();
         }
     }
@@ -567,42 +614,7 @@ class Table {
 
     getStateForClient() {
         return {
-            tableId: this.tableId,
-            tableName: this.tableName,
-            theme: this.theme,
-            state: this.state,
-            players: this.players,
-            playerOrderActive: this.playerOrderActive,
-            dealer: this.dealer,
-            hands: this.hands,
-            widow: this.widow,
-            originalDealtWidow: this.originalDealtWidow,
-            scores: this.scores,
-            currentHighestBidDetails: this.currentHighestBidDetails,
-            biddingTurnPlayerName: this.biddingTurnPlayerName,
-            bidWinnerInfo: this.bidWinnerInfo,
-            gameStarted: this.gameStarted,
-            trumpSuit: this.trumpSuit, // FIX: Added this property
-            currentTrickCards: this.currentTrickCards,
-            trickTurnPlayerName: this.trickTurnPlayerName,
-            tricksPlayedCount: this.tricksPlayedCount,
-            leadSuitCurrentTrick: this.leadSuitCurrentTrick,
-            trumpBroken: this.trumpBroken,
-            trickLeaderName: this.trickLeaderName,
-            capturedTricks: this.capturedTricks,
-            roundSummary: this.roundSummary,
-            lastCompletedTrick: this.lastCompletedTrick,
-            playersWhoPassedThisRound: this.playersWhoPassedThisRound,
-            playerMode: this.playerMode,
-            serverVersion: this.serverVersion,
-            insurance: this.insurance,
-            forfeiture: this.forfeiture,
-            playerTokens: this.playerTokens,
-            drawRequest: this.drawRequest,
-            originalFrogBidderId: this.originalFrogBidderId,
-            soloBidMadeAfterFrog: this.soloBidMadeAfterFrog,
-            revealedWidowForFrog: this.revealedWidowForFrog,
-            widowDiscardsForFrogBidder: this.widowDiscardsForFrogBidder,
+            tableId: this.tableId, tableName: this.tableName, theme: this.theme, state: this.state, players: this.players, playerOrderActive: this.playerOrderActive, dealer: this.dealer, hands: this.hands, widow: this.widow, originalDealtWidow: this.originalDealtWidow, scores: this.scores, currentHighestBidDetails: this.currentHighestBidDetails, biddingTurnPlayerName: this.biddingTurnPlayerName, bidWinnerInfo: this.bidWinnerInfo, gameStarted: this.gameStarted, trumpSuit: this.trumpSuit, currentTrickCards: this.currentTrickCards, trickTurnPlayerName: this.trickTurnPlayerName, tricksPlayedCount: this.tricksPlayedCount, leadSuitCurrentTrick: this.leadSuitCurrentTrick, trumpBroken: this.trumpBroken, trickLeaderName: this.trickLeaderName, capturedTricks: this.capturedTricks, roundSummary: this.roundSummary, lastCompletedTrick: this.lastCompletedTrick, playersWhoPassedThisRound: this.playersWhoPassedThisRound, playerMode: this.playerMode, serverVersion: this.serverVersion, insurance: this.insurance, forfeiture: this.forfeiture, playerTokens: this.playerTokens, drawRequest: this.drawRequest, originalFrogBidderId: this.originalFrogBidderId, soloBidMadeAfterFrog: this.soloBidMadeAfterFrog, revealedWidowForFrog: this.revealedWidowForFrog, widowDiscardsForFrogBidder: this.widowDiscardsForFrogBidder,
         };
     }
     
