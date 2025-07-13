@@ -12,6 +12,7 @@ const state = require('./game/gameState');
 const createAuthRoutes = require('./routes/auth');
 const createLeaderboardRoutes = require('./routes/leaderboard');
 const createAdminRoutes = require('./routes/admin');
+const createFeedbackRoutes = require('./routes/feedback'); // 1. REQUIRE THE NEW ROUTE
 const createDbTables = require('./db/createTables');
 const transactionManager = require("./db/transactionManager"); // Required for free token
 
@@ -212,6 +213,9 @@ server.listen(PORT, async () => {
 
     const adminRouter = createAdminRoutes(pool);
     app.use('/api/admin', adminRouter);
+
+    const feedbackRouter = createFeedbackRoutes(pool, jwt); // 2. CREATE THE ROUTER...
+    app.use('/api/feedback', feedbackRouter);              // ...AND USE IT
 
     state.initializeGameTables(io, pool);
 

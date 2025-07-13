@@ -11,23 +11,26 @@ const createDbTables = async (pool) => {
                     'forfeit_loss', 
                     'forfeit_payout',
                     'admin_adjustment',
-                    'free_token_mercy'
+                    'free_token_mercy',
+                    'wash_payout'
                 );
             EXCEPTION
                 WHEN duplicate_object THEN null;
             END $$;
         `);
 
-        // FIX: These commands will run every time, ensuring any missing values are added
-        // to an already existing ENUM type without causing an error. This patches the live DB.
-        await pool.query("ALTER TYPE transaction_type_enum ADD VALUE IF NOT EXISTS 'wash_payout'");
-
-        // You could add more here in the future if needed, e.g.:
-        // await pool.query("ALTER TYPE transaction_type_enum ADD VALUE IF NOT EXISTS 'another_future_type'");
-
         await pool.query(`
             DO $$ BEGIN
                 CREATE TYPE user_role_enum AS ENUM ('player', 'admin');
+            EXCEPTION
+                WHEN duplicate_object THEN null;
+            END $$;
+        `);
+
+        // NEW: Add a status type for feedback tracking
+        await pool.query(`
+            DO $$ BEGIN
+                CREATE TYPE feedback_status_enum AS ENUM ('new', 'in_progress', 'resolved', 'wont_fix');
             EXCEPTION
                 WHEN duplicate_object THEN null;
             END $$;
@@ -68,6 +71,20 @@ const createDbTables = async (pool) => {
                 amount DECIMAL(10, 2) NOT NULL,
                 description TEXT,
                 transaction_time TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+            );
+        `);
+
+        // NEW: Create the feedback table
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS feedback (
+                feedback_id SERIAL PRIMARY KEY,
+                user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                username VARCHAR(50),
+                submitted_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+                feedback_text TEXT NOT NULL,
+                table_id VARCHAR(50),
+                game_state_json JSONB,
+                status feedback_status_enum DEFAULT 'new'
             );
         `);
 
