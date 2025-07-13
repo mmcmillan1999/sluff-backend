@@ -5,123 +5,120 @@ const gameLogic = require('./logic');
 const transactionManager = require('../db/transactionManager');
 const { shuffle } = require('../utils/shuffle');
 
+/**
+ * Represents a single, self-contained game table.
+ * It manages its own state, players, and game flow.
+ */
 class Table {
     constructor(tableId, theme, tableName, io, pool, emitLobbyUpdateCallback) {
+        // --- Dependencies ---
         this.io = io;
         this.pool = pool;
         this.emitLobbyUpdateCallback = emitLobbyUpdateCallback;
+
+        // --- Static Table Info ---
         this.tableId = tableId;
         this.tableName = tableName;
         this.theme = theme;
         this.serverVersion = SERVER_VERSION;
+
+        // --- Core Game State ---
         this.state = "Waiting for Players";
-        this.players = {};
+        this.players = {}; // { [userId]: { userId, playerName, socketId, isSpectator, disconnected } }
         this.playerOrderActive = [];
         this.scores = {};
         this.gameStarted = false;
         this.gameId = null;
-        this.playerMode = null;
-        this.dealer = null;
-        this.internalTimers = {};
-        this._initializeNewRoundState(); // Call this to set all round-specific props
-    }
+        this.playerMode = null; // 3 or 4
+        this.dealer = null; // userId
 
-    // ... [All other methods like joinTable, leaveTable, etc. remain the same] ...
-    // ... [No changes needed to the player management or other game flow methods yet] ...
-    
-    /**
-     * After bidding concludes, this determines the next state (e.g., widow exchange, trump selection).
-     */
-    _resolveBiddingFinal() {
-        if (!this.currentHighestBidDetails) {
-            this.state = "AllPassWidowReveal";
-            console.log(`[${this.tableId}] DEBUG: All players passed. State set to AllPassWidowReveal.`);
-            this._emitUpdate();
-            
-            this.internalTimers.allPass = setTimeout(() => {
-                // ADDED A TRY-CATCH BLOCK HERE FOR VISIBILITY
-                try {
-                    console.log(`[${this.tableId}] DEBUG: 3-second timer fired. Checking state.`);
-                    if (this.state === "AllPassWidowReveal") {
-                        console.log(`[${this.tableId}] DEBUG: State is correct. Calling _advanceRound().`);
-                        this._advanceRound();
-                    } else {
-                        console.log(`[${this.tableId}] DEBUG: State changed before timer fired. Current state: ${this.state}. Aborting round advance.`);
-                    }
-                } catch (error) {
-                    console.error(`[${this.tableId}] FATAL ERROR inside 'allPass' timer callback:`, error);
-                }
-            }, 3000);
-            
-            console.log(`[${this.tableId}] DEBUG: 3-second timer for next round has been set.`);
-            return;
-        }
-        
-        // ... (rest of the function is unchanged)
-        this.bidWinnerInfo = { ...this.currentHighestBidDetails };
-        const bid = this.bidWinnerInfo.bid;
-
-        if (bid === "Frog") { 
-            this.trumpSuit = "H"; 
-            this.state = "Frog Widow Exchange";
-            this.revealedWidowForFrog = [...this.widow];
-            const bidderHand = this.hands[this.bidWinnerInfo.playerName];
-            this.hands[this.bidWinnerInfo.playerName] = [...bidderHand, ...this.widow];
-        } else if (bid === "Heart Solo") { 
-            this.trumpSuit = "H"; 
-            this._transitionToPlayingPhase();
-        } else if (bid === "Solo") { 
-            this.state = "Trump Selection";
-        }
-        
-        this._emitUpdate();
+        // --- Round-Specific State ---
+        this.hands = {};
+        this.widow = [];
+        this.originalDealtWidow = [];
+        this.biddingTurnPlayerName = null;
+        this.currentHighestBidDetails = null;
+        this.playersWhoPassedThisRound = [];
+        this.bidWinnerInfo = null;
+        this.trumpSuit = null;
+        this.trumpBroken = false;
         this.originalFrogBidderId = null;
         this.soloBidMadeAfterFrog = false;
+        this.revealedWidowForFrog = [];
+        this.widowDiscardsForFrogBidder = [];
+        
+        // --- Trick-Specific State ---
+        this.trickTurnPlayerName = null;
+        this.trickLeaderName = null;
+        this.currentTrickCards = [];
+        this.leadSuitCurrentTrick = null;
+        this.lastCompletedTrick = null;
+        this.tricksPlayedCount = 0;
+        this.capturedTricks = {};
+        
+        // --- Special Game States ---
+        this.roundSummary = null;
+        this.insurance = this._getInitialInsuranceState();
+        this.forfeiture = this._getInitialForfeitureState();
+        this.drawRequest = this._getInitialDrawRequestState();
+        
+        // --- Meta State ---
+        this.playerTokens = {};
+        this.internalTimers = {}; // To manage setTimeout/setInterval locally
+    }
+    
+    // =================================================================
+    // PUBLIC: Forfeit & Timeout Logic
+    // =================================================================
+
+    /**
+     * Initiates a 2-minute forfeit timer for a disconnected player.
+     * @param {number} requestingUserId - The ID of the player starting the timer.
+     * @param {string} targetPlayerName - The name of the disconnected player.
+     */
+    startForfeitTimer(requestingUserId, targetPlayerName) {
+        if (!this.players[requestingUserId] || this.internalTimers.forfeit) return;
+
+        const targetPlayer = Object.values(this.players).find(p => p.playerName === targetPlayerName);
+        if (!targetPlayer || !targetPlayer.disconnected) {
+            return this.io.to(this.players[requestingUserId].socketId).emit("error", { message: "Cannot start timer: Player is not disconnected." });
+        }
+
+        console.log(`[${this.tableId}] Forfeit timer started for ${targetPlayerName} by ${this.players[requestingUserId].playerName}.`);
+        this.forfeiture.targetPlayerName = targetPlayerName;
+        this.forfeiture.timeLeft = 120;
+        
+        this.internalTimers.forfeit = setInterval(() => {
+            if (!this.forfeiture.targetPlayerName) {
+                return this._clearForfeitTimer();
+            }
+            
+            this.forfeiture.timeLeft -= 1;
+            
+            if (this.forfeiture.timeLeft <= 0) {
+                this._resolveForfeit(targetPlayerName, "timeout");
+            } else {
+                this._emitUpdate();
+            }
+        }, 1000);
+
+        this._emitUpdate();
     }
 
     /**
-     * Rotates the dealer, resets round state, and prepares for the next hand.
+     * A player voluntarily forfeits the game.
+     * @param {number} userId - The ID of the forfeiting player.
      */
-    _advanceRound() {
-        // ADDED A TRY-CATCH BLOCK HERE FOR VISIBILITY
-        try {
-            console.log(`[${this.tableId}] DEBUG: --- Entering _advanceRound ---`);
-            if (!this.gameStarted) {
-                console.log(`[${this.tableId}] DEBUG: Game not started. Aborting _advanceRound.`);
-                return;
-            }
-            
-            // The player to the left of the dealer becomes the new dealer.
-            // This is the first person in the current play order.
-            const newDealerName = this.playerOrderActive.shift();
-            this.playerOrderActive.push(newDealerName); // Move them to the end for the next round's order.
-            console.log(`[${this.tableId}] DEBUG: Rotated player order. New first player (next dealer): ${this.playerOrderActive[0]}`);
-
-            const newDealer = Object.values(this.players).find(p => p.playerName === newDealerName);
-            if (!newDealer) {
-                // This is a critical failure.
-                console.error(`[${this.tableId}] FATAL ERROR in _advanceRound: Could not find player object for new dealer: ${newDealerName}. Resetting table.`);
-                this.reset();
-                return;
-            }
-            this.dealer = newDealer.userId;
-            console.log(`[${this.tableId}] DEBUG: New dealer is ${newDealerName} (ID: ${this.dealer})`);
-
-            this._initializeNewRoundState();
-            this.state = "Dealing Pending";
-            
-            console.log(`[${this.tableId}] DEBUG: Round advanced successfully. New state: ${this.state}. Emitting update.`);
-            this._emitUpdate();
-        } catch (error) {
-            console.error(`[${this.tableId}] FATAL ERROR inside _advanceRound method:`, error);
-        }
+    forfeitGame(userId) {
+        const playerName = this.players[userId]?.playerName;
+        if (!playerName || !this.gameStarted) return;
+        this._resolveForfeit(playerName, "voluntary forfeit");
     }
 
-    // --- PASTE THE REST OF THE UNCHANGED Table.js FILE HERE ---
-    // (The full code is long, so just showing the changed methods. Copy the rest from the previous step)
     // =================================================================
     // PUBLIC: Player & Connection Management
     // =================================================================
+
     async joinTable(user, socketId) {
         const { id, username } = user;
         const isPlayerAlreadyInGame = !!this.players[id];
@@ -153,6 +150,7 @@ class Table {
         this._emitUpdate();
         this.emitLobbyUpdateCallback();
     }
+
     async leaveTable(userId) {
         if (!this.players[userId]) return;
         const playerInfo = this.players[userId];
@@ -165,13 +163,14 @@ class Table {
         this._emitUpdate();
         this.emitLobbyUpdateCallback();
     }
+    
     disconnectPlayer(userId) {
         const player = this.players[userId];
-        if (!player || !this.gameStarted || player.isSpectator) {
-            if (player) {
-                delete this.players[userId];
-                this._recalculateActivePlayerOrder();
-            }
+        if (!player) return;
+
+        if (!this.gameStarted || player.isSpectator) {
+            delete this.players[userId];
+            this._recalculateActivePlayerOrder();
         } else {
             console.log(`[${this.tableId}] Player ${player.playerName} has disconnected.`);
             player.disconnected = true;
@@ -179,6 +178,7 @@ class Table {
         this._emitUpdate();
         this.emitLobbyUpdateCallback();
     }
+    
     reconnectPlayer(userId, newSocketId) {
         if (!this.players[userId] || !this.players[userId].disconnected) return;
         console.log(`[${this.tableId}] Reconnecting user ${this.players[userId].playerName}.`);
@@ -192,6 +192,11 @@ class Table {
         this._emitUpdate();
         this.emitLobbyUpdateCallback();
     }
+
+    // =================================================================
+    // PUBLIC: Game Flow Management
+    // =================================================================
+
     async startGame(requestingUserId) {
         if (this.gameStarted) return;
         if (!this.players[requestingUserId] || this.players[requestingUserId].isSpectator) return;
@@ -236,6 +241,7 @@ class Table {
             }
         }
     }
+    
     dealCards(requestingUserId) {
         if (this.state !== "Dealing Pending" || requestingUserId !== this.dealer) return;
         const shuffledDeck = shuffle([...deck]);
@@ -246,6 +252,7 @@ class Table {
         this.biddingTurnPlayerName = this.playerOrderActive[0];
         this._emitUpdate();
     }
+
     placeBid(userId, bid) {
         const player = this.players[userId];
         if (!player || player.playerName !== this.biddingTurnPlayerName) return;
@@ -279,6 +286,7 @@ class Table {
         }
         this._emitUpdate();
     }
+    
     playCard(userId, card) {
         const player = this.players[userId];
         if (!player || this.state !== "Playing Phase" || player.playerName !== this.trickTurnPlayerName) return;
@@ -306,9 +314,11 @@ class Table {
             this._emitUpdate();
         }
     }
+
     requestNextRound(requestingUserId) {
         if (this.state === "Awaiting Next Round Trigger" && requestingUserId === this.roundSummary?.dealerOfRoundId) { this._advanceRound(); }
     }
+
     async reset() {
         console.log(`[${this.tableId}] Game is being reset.`);
         this._clearAllTimers();
@@ -330,6 +340,11 @@ class Table {
         this._emitUpdate();
         this.emitLobbyUpdateCallback();
     }
+    
+    // =================================================================
+    // INTERNAL: Game Flow and State Transitions (_prefix)
+    // =================================================================
+
     _resolveTrick() {
         const winnerInfo = gameLogic.determineTrickWinner(this.currentTrickCards, this.leadSuitCurrentTrick, this.trumpSuit);
         this.lastCompletedTrick = { cards: [...this.currentTrickCards], winnerName: winnerInfo.playerName };
@@ -352,6 +367,37 @@ class Table {
             }, 1000);
         }
     }
+
+    _resolveBiddingFinal() {
+        if (!this.currentHighestBidDetails) {
+            this.state = "AllPassWidowReveal";
+            this._emitUpdate();
+            this.internalTimers.allPass = setTimeout(() => {
+                if (this.state === "AllPassWidowReveal") {
+                    this._advanceRound();
+                }
+            }, 3000);
+            return;
+        }
+        this.bidWinnerInfo = { ...this.currentHighestBidDetails };
+        const bid = this.bidWinnerInfo.bid;
+        if (bid === "Frog") { 
+            this.trumpSuit = "H"; 
+            this.state = "Frog Widow Exchange";
+            this.revealedWidowForFrog = [...this.widow];
+            const bidderHand = this.hands[this.bidWinnerInfo.playerName];
+            this.hands[this.bidWinnerInfo.playerName] = [...bidderHand, ...this.widow];
+        } else if (bid === "Heart Solo") { 
+            this.trumpSuit = "H"; 
+            this._transitionToPlayingPhase();
+        } else if (bid === "Solo") { 
+            this.state = "Trump Selection";
+        }
+        this._emitUpdate();
+        this.originalFrogBidderId = null;
+        this.soloBidMadeAfterFrog = false;
+    }
+
     _checkForFrogUpgrade() {
         if (this.soloBidMadeAfterFrog && this.originalFrogBidderId) {
             this.state = "Awaiting Frog Upgrade Decision";
@@ -359,6 +405,7 @@ class Table {
         } else { this._resolveBiddingFinal(); }
         this._emitUpdate();
     }
+    
     _transitionToPlayingPhase() {
         this.state = "Playing Phase";
         this.tricksPlayedCount = 0;
@@ -379,6 +426,24 @@ class Table {
         }
         this._emitUpdate();
     }
+    
+    _advanceRound() {
+        if (!this.gameStarted) return;
+        const newDealerName = this.playerOrderActive.shift();
+        this.playerOrderActive.push(newDealerName);
+        const newDealer = Object.values(this.players).find(p => p.playerName === newDealerName);
+        if (!newDealer) {
+            console.error(`[${this.tableId}] FATAL: Could not find new dealer. Resetting table.`);
+            this.reset();
+            return;
+        }
+        this.dealer = newDealer.userId;
+        this._initializeNewRoundState();
+        this.state = "Dealing Pending";
+        console.log(`[${this.tableId}] Round advanced. New dealer: ${newDealerName}. State: ${this.state}`);
+        this._emitUpdate();
+    }
+    
     async _calculateRoundScores() {
         const roundData = gameLogic.calculateRoundScoreDetails(this);
         for(const playerName in roundData.pointChanges) { if(this.scores[playerName] !== undefined) { this.scores[playerName] += roundData.pointChanges[playerName]; } }
@@ -396,6 +461,11 @@ class Table {
         this.state = isGameOver ? "Game Over" : "Awaiting Next Round Trigger";
         this._emitUpdate();
     }
+
+    // =================================================================
+    // INTERNAL: Misc Helpers
+    // =================================================================
+
     _recalculateActivePlayerOrder() {
         const activePlayers = Object.values(this.players).filter(p => !p.isSpectator && !p.disconnected);
         if (activePlayers.length === 0) { this.playerOrderActive = []; return; }
@@ -408,6 +478,7 @@ class Table {
             this.playerOrderActive = orderedNames;
         } else { this.playerOrderActive = activePlayers.map(p => p.playerName).sort(); }
     }
+
     getStateForClient() { return { tableId: this.tableId, tableName: this.tableName, theme: this.theme, state: this.state, players: this.players, playerOrderActive: this.playerOrderActive, dealer: this.dealer, hands: this.hands, widow: this.widow, originalDealtWidow: this.originalDealtWidow, scores: this.scores, currentHighestBidDetails: this.currentHighestBidDetails, biddingTurnPlayerName: this.biddingTurnPlayerName, bidWinnerInfo: this.bidWinnerInfo, gameStarted: this.gameStarted, currentTrickCards: this.currentTrickCards, trickTurnPlayerName: this.trickTurnPlayerName, tricksPlayedCount: this.tricksPlayedCount, leadSuitCurrentTrick: this.leadSuitCurrentTrick, trumpBroken: this.trumpBroken, trickLeaderName: this.trickLeaderName, capturedTricks: this.capturedTricks, roundSummary: this.roundSummary, lastCompletedTrick: this.lastCompletedTrick, playersWhoPassedThisRound: this.playersWhoPassedThisRound, playerMode: this.playerMode, serverVersion: this.serverVersion, insurance: this.insurance, forfeiture: this.forfeiture, playerTokens: this.playerTokens, drawRequest: this.drawRequest, originalFrogBidderId: this.originalFrogBidderId, soloBidMadeAfterFrog: this.soloBidMadeAfterFrog, revealedWidowForFrog: this.revealedWidowForFrog, widowDiscardsForFrogBidder: this.widowDiscardsForFrogBidder }; }
     _emitUpdate() { this.io.to(this.tableId).emit('gameState', this.getStateForClient()); }
     _clearAllTimers() { for (const timer in this.internalTimers) { clearTimeout(this.internalTimers[timer]); clearInterval(this.internalTimers[timer]); } this.internalTimers = {}; }

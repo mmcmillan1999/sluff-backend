@@ -13,6 +13,7 @@ const createAuthRoutes = require('./routes/auth');
 const createLeaderboardRoutes = require('./routes/leaderboard');
 const createAdminRoutes = require('./routes/admin');
 const createDbTables = require('./db/createTables');
+const transactionManager = require("./db/transactionManager"); // Required for free token
 
 const app = express();
 const server = http.createServer(app);
@@ -50,13 +51,11 @@ io.use((socket, next) => {
 io.on("connection", (socket) => {
     console.log(`Socket connected: ${socket.user.username} (ID: ${socket.user.id}, Socket: ${socket.id})`);
 
-    // --- Reconnection Logic ---
     const table = Object.values(state.getAllTables()).find(t => t.players[socket.user.id]);
     if (table && table.players[socket.user.id].disconnected) {
         table.reconnectPlayer(socket.user.id, socket.id);
     }
     
-    // Always send the latest lobby state on connection
     socket.emit("lobbyState", state.getLobbyState());
 
     // --- CORE EVENT LISTENERS (DELEGATION MODEL) ---
@@ -65,7 +64,6 @@ io.on("connection", (socket) => {
         const tableToJoin = state.getTableById(tableId);
         if (!tableToJoin) return socket.emit("error", { message: "Table not found." });
 
-        // If player is at another table, have them leave first
         const previousTable = Object.values(state.getAllTables()).find(t => t.players[socket.user.id] && t.tableId !== tableId);
         if (previousTable) {
             await previousTable.leaveTable(socket.user.id);
@@ -82,6 +80,7 @@ io.on("connection", (socket) => {
             await tableToLeave.leaveTable(socket.user.id);
         }
         socket.leave(tableId);
+        socket.emit("lobbyState", state.getLobbyState());
     });
 
     socket.on("startGame", ({ tableId }) => {
@@ -149,7 +148,6 @@ io.on("connection", (socket) => {
         if (table) table.submitDrawVote(socket.user.id, vote);
     });
 
-
     // --- USER-SPECIFIC & MISC LISTENERS ---
 
     socket.on("requestUserSync", async () => {
@@ -161,7 +159,7 @@ io.on("connection", (socket) => {
             if (updatedUser) {
                 const tokenQuery = "SELECT SUM(amount) AS current_tokens FROM transactions WHERE user_id = $1";
                 const tokenResult = await pool.query(tokenQuery, [socket.user.id]);
-                updatedUser.tokens = parseFloat(tokenResult.rows[0].current_tokens || 0).toFixed(2);
+                updatedUser.tokens = parseFloat(tokenResult.rows[0]?.current_tokens || 0).toFixed(2);
                 socket.emit("updateUser", updatedUser);
             }
         } catch(err) {
@@ -206,7 +204,6 @@ server.listen(PORT, async () => {
     console.log("✅ Database connection successful.");
     await createDbTables(pool);
     
-    // Inject dependencies into modules
     const authRoutes = createAuthRoutes(pool, bcrypt, jwt);
     app.use('/api/auth', authRoutes);
 
@@ -216,7 +213,6 @@ server.listen(PORT, async () => {
     const adminRouter = createAdminRoutes(pool);
     app.use('/api/admin', adminRouter);
 
-    // Initialize game tables with necessary dependencies
     state.initializeGameTables(io, pool);
 
   } catch (err) {
