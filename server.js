@@ -90,16 +90,19 @@ async function resolveForfeit(tableId, forfeitingPlayerName, reason) {
         
         const transactionPromises = [];
         if (forfeitingPlayer) {
-            const tableCost = TABLE_COSTS[table.theme] || 0;
+            // FIX: The forfeit transaction itself is for 0 tokens.
+            // The financial loss is the original buy-in, which is already accounted for.
+            // This transaction is now just a record of the event.
             transactionPromises.push(transactionManager.postTransaction(pool, {
                 userId: forfeitingPlayer.userId, gameId: table.gameId, type: 'forfeit_loss',
-                amount: -tableCost, description: `Forfeited game on table ${table.tableName}`
+                amount: 0, description: `Forfeited game on table ${table.tableName}`
             }));
         }
 
         remainingPlayers.forEach(player => {
             const payoutInfo = tokenChanges[player.playerName];
             if (payoutInfo && payoutInfo.totalGain > 0) {
+                // Remaining players get their own buy-in back PLUS the proportional share.
                 transactionPromises.push(transactionManager.postTransaction(pool, {
                     userId: player.userId, gameId: table.gameId, type: 'forfeit_payout',
                     amount: payoutInfo.totalGain, description: `Payout from ${forfeitingPlayerName}'s forfeit`
@@ -185,7 +188,6 @@ io.on("connection", (socket) => {
                 updatedUser.tokens = parseFloat(tokenResult.rows[0].current_tokens || 0).toFixed(2);
 
                 socket.emit("updateUser", updatedUser);
-                console.log(`[SYNC] Sent updated user data to ${updatedUser.username}.`);
             }
         } catch(err) {
             console.error(`Error during user sync for user ${socket.user.id}:`, err);
@@ -204,10 +206,9 @@ io.on("connection", (socket) => {
 
         const targetPlayer = Object.values(table.players).find(p => p.playerName === targetPlayerName);
         if (!targetPlayer || !targetPlayer.disconnected) {
-            return socket.emit("error", "Cannot start timer: Player is not disconnected.");
+            return socket.emit("error", { message: "Cannot start timer: Player is not disconnected." });
         }
 
-        console.log(`[${tableId}] Timeout clock started for ${targetPlayerName} by ${socket.user.username}.`);
         table.forfeiture.targetPlayerName = targetPlayerName;
         table.forfeiture.timeLeft = 120;
         
@@ -232,38 +233,30 @@ io.on("connection", (socket) => {
     socket.on("requestFreeToken", async () => {
         try {
             await transactionManager.postTransaction(pool, {
-                userId: socket.user.id,
-                gameId: null,
-                type: 'free_token_mercy',
-                amount: 1,
+                userId: socket.user.id, gameId: null, type: 'free_token_mercy', amount: 1,
                 description: 'Mercy token requested by user'
             });
             socket.emit("requestUserSync");
         } catch (err) {
-            console.error("Error giving free token:", err);
-            socket.emit("error", "Could not grant token.");
+            socket.emit("error", { message: "Could not grant token." });
         }
     });
 
     socket.on("sacrificeToken", async () => {
         try {
              await transactionManager.postTransaction(pool, {
-                userId: socket.user.id,
-                gameId: null,
-                type: 'admin_adjustment',
-                amount: -1,
+                userId: socket.user.id, gameId: null, type: 'admin_adjustment', amount: -1,
                 description: 'User sacrificed a token to the gods of Sluff.'
             });
             socket.emit("requestUserSync");
         } catch (err) {
-            console.error("Error sacrificing token:", err);
-            socket.emit("error", "Could not sacrifice token.");
+            socket.emit("error", { message: "Could not sacrifice token." });
         }
     });
 
     socket.on("joinTable", async ({ tableId }) => {
         const table = state.getTableById(tableId);
-        if (!table) return socket.emit("error", "Table not found.");
+        if (!table) return socket.emit("error", { message: "Table not found." });
         
         const { id, username } = socket.user;
         const isPlayerAlreadyInGame = table.players[id];
@@ -274,20 +267,19 @@ io.on("connection", (socket) => {
                 const userTokens = parseFloat(tokenResult.rows[0].tokens || 0);
 
                 if (userTokens < tableCost) {
-                    return socket.emit("error", `You need ${tableCost} tokens to join. You have ${userTokens.toFixed(2)}.`);
+                    return socket.emit("error", { message: `You need ${tableCost} tokens to join. You have ${userTokens.toFixed(2)}.` });
                 }
             } catch (err) {
-                console.error("Database error during joinTable token check:", err);
-                return socket.emit("error", "A server error occurred trying to join the table.");
+                return socket.emit("error", { message: "A server error occurred trying to join the table." });
             }
         }
 
         if (table.gameStarted && !isPlayerAlreadyInGame) {
-            return socket.emit("error", "Game has already started.");
+            return socket.emit("error", { message: "Game has already started." });
         }
 
-        const previousTable = Object.values(state.getAllTables()).find(t => t.players[id]);
-        if (previousTable && previousTable.tableId !== tableId) {
+        const previousTable = Object.values(state.getAllTables()).find(t => t.players[id] && t.tableId !== tableId);
+        if (previousTable) {
             delete previousTable.players[id];
             socket.leave(previousTable.tableId);
             emitTableUpdate(previousTable.tableId);
@@ -319,16 +311,10 @@ io.on("connection", (socket) => {
                 const tokenResult = await pool.query(tokenQuery, [playerIds]);
                 
                 const playerTokens = {};
-                const userIdToNameMap = Object.values(table.players).reduce((acc, player) => {
-                    acc[player.userId] = player.playerName;
-                    return acc;
-                }, {});
-
+                const userIdToNameMap = Object.values(table.players).reduce((acc, player) => { acc[player.userId] = player.playerName; return acc; }, {});
                 tokenResult.rows.forEach(row => {
                     const playerName = userIdToNameMap[row.user_id];
-                    if (playerName) {
-                        playerTokens[playerName] = parseFloat(row.tokens || 0).toFixed(2);
-                    }
+                    if (playerName) playerTokens[playerName] = parseFloat(row.tokens || 0).toFixed(2);
                 });
                 table.playerTokens = playerTokens;
             }
@@ -346,7 +332,6 @@ io.on("connection", (socket) => {
         if (!table || !table.players[userId]) return;
 
         const playerInfo = table.players[userId];
-        
         const safeLeaveStates = ["Waiting for Players", "Ready to Start", "Game Over"];
         if (safeLeaveStates.includes(table.state) || playerInfo.isSpectator) {
             delete table.players[userId];
@@ -360,7 +345,6 @@ io.on("connection", (socket) => {
         emitLobbyUpdate();
     });
 
-    // --- CORRECTED startGame HANDLER ---
     socket.on("startGame", async ({ tableId }) => {
         const table = state.getTableById(tableId);
         if (!table || table.gameStarted) return;
@@ -377,7 +361,6 @@ io.on("connection", (socket) => {
             const gameId = await transactionManager.createGameRecord(pool, table);
             table.gameId = gameId;
 
-            // FIX: Pass only the active player IDs and game ID to the robust transaction handler
             await transactionManager.handleGameStartTransaction(pool, activePlayerIds, gameId);
             
             table.gameStarted = true;
@@ -389,50 +372,47 @@ io.on("connection", (socket) => {
             table.dealer = shuffledPlayerIds[0];
             const dealerIndex = shuffledPlayerIds.indexOf(table.dealer);
             table.playerOrderActive = [];
-            const numPlayers = shuffledPlayerIds.length;
-            for (let i = 1; i <= numPlayers; i++) {
-                const playerIndex = (dealerIndex + i) % numPlayers;
-                const playerId = shuffledPlayerIds[playerIndex];
-                if (table.playerMode === 4 && playerId === table.dealer) continue;
+            for (let i = 1; i <= shuffledPlayerIds.length; i++) {
+                const playerId = shuffledPlayerIds[(dealerIndex + i) % shuffledPlayerIds.length];
                 table.playerOrderActive.push(getPlayerNameByUserId(playerId, table));
             }
             state.initializeNewRoundState(table);
             table.state = "Dealing Pending";
             
-            // Re-fetch token balances AFTER the transaction and attach them
-            try {
-                const tokenQuery = `SELECT user_id, SUM(amount) as tokens FROM transactions WHERE user_id = ANY($1::int[]) GROUP BY user_id;`;
-                const tokenResult = await pool.query(tokenQuery, [activePlayerIds]);
-                
-                const playerTokens = {};
-                const userIdToNameMap = activePlayers.reduce((acc, player) => {
-                    acc[player.userId] = player.playerName;
-                    return acc;
-                }, {});
-
-                tokenResult.rows.forEach(row => {
-                    const playerName = userIdToNameMap[row.user_id];
-                    if (playerName) {
-                        playerTokens[playerName] = parseFloat(row.tokens || 0).toFixed(2);
-                    }
-                });
-                table.playerTokens = playerTokens;
-            } catch (err) {
-                console.error(`Error fetching tokens after game start for table ${tableId}:`, err);
-            }
+            const tokenQuery = `SELECT user_id, SUM(amount) as tokens FROM transactions WHERE user_id = ANY($1::int[]) GROUP BY user_id;`;
+            const tokenResult = await pool.query(tokenQuery, [activePlayerIds]);
+            const playerTokens = {};
+            const userIdToNameMap = activePlayers.reduce((acc, player) => { acc[player.userId] = player.playerName; return acc; }, {});
+            tokenResult.rows.forEach(row => {
+                const playerName = userIdToNameMap[row.user_id];
+                if (playerName) playerTokens[playerName] = parseFloat(row.tokens || 0).toFixed(2);
+            });
+            table.playerTokens = playerTokens;
 
             emitTableUpdate(tableId);
             emitLobbyUpdate();
-            console.log(`Game ${gameId} successfully started on table ${tableId}`);
 
         } catch (err) {
-            console.error("Error during startGame:", err.message);
-            socket.emit("error", { message: err.message || "A server error occurred during buy-in." });
-            
-            table.gameStarted = false; 
-            table.playerMode = null;
-            table.gameId = null; 
-            return;
+            const insufficientFundsMatch = err.message.match(/(.+) has insufficient tokens/);
+            if (insufficientFundsMatch) {
+                const brokePlayerName = insufficientFundsMatch[1];
+                const brokePlayer = Object.values(table.players).find(p => p.playerName === brokePlayerName);
+                if (brokePlayer) {
+                    delete table.players[brokePlayer.userId];
+                    table.playerOrderActive = table.playerOrderActive.filter(pName => pName !== brokePlayerName);
+                    table.playerMode = table.playerOrderActive.length;
+                    table.state = table.playerMode >= 3 ? "Ready to Start" : "Waiting for Players";
+                    table.gameId = null; 
+                    io.to(tableId).emit("gameStartFailed", { message: err.message, kickedPlayer: brokePlayerName });
+                    emitTableUpdate(tableId);
+                    emitLobbyUpdate();
+                }
+            } else {
+                socket.emit("error", { message: err.message || "A server error occurred during buy-in." });
+                table.gameStarted = false; 
+                table.playerMode = null;
+                table.gameId = null;
+            }
         }
     });
 
@@ -442,12 +422,10 @@ io.on("connection", (socket) => {
         if (!table || table.state !== "Dealing Pending" || socket.user.id !== table.dealer) return;
         
         const shuffledDeck = shuffle([...deck]);
-        const numActivePlayers = table.playerOrderActive.length;
-        
         table.playerOrderActive.forEach((pName, i) => {
             table.hands[pName] = shuffledDeck.slice(i * 11, (i + 1) * 11);
         });
-        table.widow = shuffledDeck.slice(11 * numActivePlayers);
+        table.widow = shuffledDeck.slice(11 * table.playerOrderActive.length);
         table.originalDealtWidow = [...table.widow];
         
         table.state = "Bidding Phase";
@@ -460,7 +438,7 @@ io.on("connection", (socket) => {
         const { id, username } = socket.user;
         if (!table || username !== table.biddingTurnPlayerName) return;
         
-        const logicHelpers = { getPlayerNameByUserId, getTableById: state.getTableById, resetTable: (id) => state.resetTable(id, { emitTableUpdate, emitLobbyUpdate }), initializeNewRoundState: state.initializeNewRoundState, shuffle };
+        const helpers = { resetTable: (id) => state.resetTable(id, pool, { emitTableUpdate, emitLobbyUpdate }), getPlayerNameByUserId, initializeNewRoundState: state.initializeNewRoundState, shuffle };
 
         if (table.state === "Awaiting Frog Upgrade Decision") {
             if (id !== table.originalFrogBidderId || (bid !== "Heart Solo" && bid !== "Pass")) return;
@@ -468,39 +446,27 @@ io.on("connection", (socket) => {
                 table.currentHighestBidDetails = { userId: id, playerName: username, bid: "Heart Solo" };
             }
             table.biddingTurnPlayerName = null;
-            gameLogic.resolveBiddingFinal(table, io, logicHelpers);
+            gameLogic.resolveBiddingFinal(table, io, helpers);
             return;
         }
 
-        if (table.state !== "Bidding Phase") return;
-        if (!BID_HIERARCHY.includes(bid) || table.playersWhoPassedThisRound.includes(username)) return;
+        if (table.state !== "Bidding Phase" || !BID_HIERARCHY.includes(bid) || table.playersWhoPassedThisRound.includes(username)) return;
 
         const currentHighestBidIndex = table.currentHighestBidDetails ? BID_HIERARCHY.indexOf(table.currentHighestBidDetails.bid) : -1;
         if (bid !== "Pass" && BID_HIERARCHY.indexOf(bid) <= currentHighestBidIndex) return;
 
         if (bid !== "Pass") {
             table.currentHighestBidDetails = { userId: id, playerName: username, bid };
-            if (bid === "Frog" && !table.originalFrogBidderId) {
-                table.originalFrogBidderId = id;
-            }
-            if (bid === "Solo" && table.originalFrogBidderId && id !== table.originalFrogBidderId) {
-                table.soloBidMadeAfterFrog = true;
-            }
+            if (bid === "Frog" && !table.originalFrogBidderId) table.originalFrogBidderId = id;
+            if (bid === "Solo" && table.originalFrogBidderId && id !== table.originalFrogBidderId) table.soloBidMadeAfterFrog = true;
         } else {
             table.playersWhoPassedThisRound.push(username);
         }
 
         const activeBiddersRemaining = table.playerOrderActive.filter(name => !table.playersWhoPassedThisRound.includes(name));
-        let endBidding = false;
-        if (table.currentHighestBidDetails && activeBiddersRemaining.length <= 1) {
-             endBidding = true;
-        } else if (table.playersWhoPassedThisRound.length === table.playerOrderActive.length) {
-            endBidding = true;
-        }
-
-        if (endBidding) {
+        if ((table.currentHighestBidDetails && activeBiddersRemaining.length <= 1) || table.playersWhoPassedThisRound.length === table.playerOrderActive.length) {
             table.biddingTurnPlayerName = null;
-            gameLogic.checkForFrogUpgrade(table, io, logicHelpers);
+            gameLogic.checkForFrogUpgrade(table, io, helpers);
         } else {
             let currentBidderIndex = table.playerOrderActive.indexOf(username);
             let nextBidderName = null;
@@ -511,11 +477,8 @@ io.on("connection", (socket) => {
                     break;
                 }
             }
-            if (nextBidderName) {
-                table.biddingTurnPlayerName = nextBidderName;
-            } else {
-                gameLogic.checkForFrogUpgrade(table, io, logicHelpers);
-            }
+            if (nextBidderName) table.biddingTurnPlayerName = nextBidderName;
+            else gameLogic.checkForFrogUpgrade(table, io, helpers);
         }
         emitTableUpdate(tableId);
     });
@@ -523,8 +486,7 @@ io.on("connection", (socket) => {
     socket.on("chooseTrump", ({ tableId, suit }) => {
         const table = state.getTableById(tableId);
         const { id } = socket.user;
-        if(!table || table.state !== "Trump Selection" || table.bidWinnerInfo.userId !== id) return;
-        if(!["S", "C", "D"].includes(suit)) return;
+        if(!table || table.state !== "Trump Selection" || table.bidWinnerInfo.userId !== id || !["S", "C", "D"].includes(suit)) return;
         table.trumpSuit = suit;
         gameLogic.transitionToPlayingPhase(table, io);
     });
@@ -532,11 +494,10 @@ io.on("connection", (socket) => {
     socket.on("submitFrogDiscards", ({ tableId, discards }) => {
         const table = state.getTableById(tableId);
         const { id, username } = socket.user;
-        if(!table || table.state !== "Frog Widow Exchange" || table.bidWinnerInfo.userId !== id) return;
-        if(!Array.isArray(discards) || discards.length !== 3) return;
+        if(!table || table.state !== "Frog Widow Exchange" || table.bidWinnerInfo.userId !== id || !Array.isArray(discards) || discards.length !== 3) return;
         
         const currentHand = table.hands[username];
-        if(!discards.every(card => currentHand.includes(card))) return socket.emit("error", "Invalid discard selection.");
+        if(!discards.every(card => currentHand.includes(card))) return socket.emit("error", { message: "Invalid discard selection." });
 
         table.widowDiscardsForFrogBidder = discards;
         table.hands[username] = currentHand.filter(card => !discards.includes(card));
@@ -556,17 +517,15 @@ io.on("connection", (socket) => {
         const playedSuit = gameLogic.getSuit(card);
     
         if (isLeading) {
-            if (playedSuit === table.trumpSuit && !table.trumpBroken) {
-                const isHandAllTrump = hand.every(c => gameLogic.getSuit(c) === table.trumpSuit);
-                if (!isHandAllTrump) return socket.emit("error", { message: "Cannot lead trump until it is broken." });
+            if (playedSuit === table.trumpSuit && !table.trumpBroken && !hand.every(c => gameLogic.getSuit(c) === table.trumpSuit)) {
+                return socket.emit("error", { message: "Cannot lead trump until it is broken." });
             }
         } else {
             const leadCardSuit = table.leadSuitCurrentTrick;
             const hasLeadSuit = hand.some(c => gameLogic.getSuit(c) === leadCardSuit);
-            if (playedSuit !== leadCardSuit && hasLeadSuit) return socket.emit("error", { message: `Must follow suit (${SUITS[leadCardSuit]}).` });
-            if (!hasLeadSuit) {
-                const hasTrump = hand.some(c => gameLogic.getSuit(c) === table.trumpSuit);
-                if (hasTrump && playedSuit !== table.trumpSuit) return socket.emit("error", { message: "You must play trump if you cannot follow suit." });
+            if (hasLeadSuit && playedSuit !== leadCardSuit) return socket.emit("error", { message: `Must follow suit (${SUITS[leadCardSuit]}).` });
+            if (!hasLeadSuit && hand.some(c => gameLogic.getSuit(c) === table.trumpSuit) && playedSuit !== table.trumpSuit) {
+                return socket.emit("error", { message: "You must play trump if you cannot follow suit." });
             }
         }
     
@@ -582,10 +541,8 @@ io.on("connection", (socket) => {
             table.tricksPlayedCount++;
             table.trickLeaderName = winnerInfo.playerName;
     
-            if (winnerInfo.playerName) {
-                if (!table.capturedTricks[winnerInfo.playerName]) table.capturedTricks[winnerInfo.playerName] = [];
-                table.capturedTricks[winnerInfo.playerName].push(table.currentTrickCards.map(p => p.card));
-            }
+            if (winnerInfo.playerName && !table.capturedTricks[winnerInfo.playerName]) table.capturedTricks[winnerInfo.playerName] = [];
+            if(winnerInfo.playerName) table.capturedTricks[winnerInfo.playerName].push(table.currentTrickCards.map(p => p.card));
             
             if (table.tricksPlayedCount === 11) {
                 gameLogic.calculateRoundScores(table, io, pool);
@@ -613,36 +570,24 @@ io.on("connection", (socket) => {
     socket.on("updateInsuranceSetting", ({ tableId, settingType, value }) => {
         const table = state.getTableById(tableId);
         const { username } = socket.user;
-        if (!username || !table) return socket.emit("error", "Player or table not found.");
-        if (!table.insurance.isActive) return socket.emit("error", "Insurance is not currently active.");
-        if (table.insurance.dealExecuted) return socket.emit("error", "Insurance deal already made, settings are locked.");
+        if (!username || !table || !table.insurance.isActive || table.insurance.dealExecuted) return;
         
         const multiplier = table.insurance.bidMultiplier;
         const parsedValue = parseInt(value, 10);
-        if (isNaN(parsedValue)) return socket.emit("error", "Invalid value. Must be a whole number.");
+        if (isNaN(parsedValue)) return;
 
-        if (settingType === 'bidderRequirement') {
-            if (username !== table.insurance.bidderPlayerName) return socket.emit("error", "Only the bid winner can update the requirement.");
+        if (settingType === 'bidderRequirement' && username === table.insurance.bidderPlayerName) {
             const minReq = -120 * multiplier; const maxReq = 120 * multiplier;
-            if (parsedValue < minReq || parsedValue > maxReq) return socket.emit("error", `Requirement out of range [${minReq}, ${maxReq}].`);
-            table.insurance.bidderRequirement = parsedValue;
-        } else if (settingType === 'defenderOffer') {
-            if (!table.insurance.defenderOffers.hasOwnProperty(username)) return socket.emit("error", "You are not a listed defender.");
+            if (parsedValue >= minReq && parsedValue <= maxReq) table.insurance.bidderRequirement = parsedValue;
+        } else if (settingType === 'defenderOffer' && table.insurance.defenderOffers.hasOwnProperty(username)) {
             const minOffer = -60 * multiplier; const maxOffer = 60 * multiplier;
-            if (parsedValue < minOffer || parsedValue > maxOffer) return socket.emit("error", `Offer out of range [${minOffer}, ${maxOffer}].`);
-            table.insurance.defenderOffers[username] = parsedValue;
-        } else {
-            return socket.emit("error", "Invalid insurance setting type.");
+            if (parsedValue >= minOffer && parsedValue <= maxOffer) table.insurance.defenderOffers[username] = parsedValue;
         }
 
         const { bidderRequirement, defenderOffers } = table.insurance;
-        const sumOfDefenderOffers = Object.values(defenderOffers || {}).reduce((sum, offer) => sum + (offer || 0), 0);
-        if (bidderRequirement <= sumOfDefenderOffers) {
+        if (bidderRequirement <= Object.values(defenderOffers || {}).reduce((sum, offer) => sum + (offer || 0), 0)) {
             table.insurance.dealExecuted = true;
-            table.insurance.executedDetails = {
-                agreement: { bidderPlayerName: table.insurance.bidderPlayerName, bidderRequirement: bidderRequirement, defenderOffers: { ...defenderOffers } },
-            };
-            console.log(`[${tableId}] INSURANCE DEAL EXECUTED!`);
+            table.insurance.executedDetails = { agreement: { bidderPlayerName: table.insurance.bidderPlayerName, bidderRequirement, defenderOffers: { ...defenderOffers } } };
         }
         emitTableUpdate(tableId);
     });
@@ -650,79 +595,106 @@ io.on("connection", (socket) => {
     socket.on("requestNextRound", ({ tableId }) => {
         const table = state.getTableById(tableId);
         if (table && table.state === "Awaiting Next Round Trigger" && socket.user.id === table.roundSummary?.dealerOfRoundId) {
-            const helpers = { resetTable: (id) => state.resetTable(id, { emitTableUpdate, emitLobbyUpdate }), getPlayerNameByUserId, initializeNewRoundState: state.initializeNewRoundState, shuffle };
+            const helpers = { resetTable: (id) => state.resetTable(id, pool, { emitTableUpdate, emitLobbyUpdate }), getPlayerNameByUserId, initializeNewRoundState: state.initializeNewRoundState, shuffle };
             gameLogic.prepareNextRound(table, io, helpers);
-        } else {
-            socket.emit("error", "Cannot start next round: Not the correct state or you are not the dealer.");
         }
     });
 
-    socket.on("hardResetServer", ({ secret }) => {
-        const correctSecret = "Mouse_4357835210";
-        if (secret === correctSecret) {
-            console.log(`[ADMIN] User ${socket.user.username} initiated a successful hard server reset.`);
-            state.initializeGameTables();
-            io.emit("forceDisconnectAndReset", "The game server was reset by an administrator.");
-        } else {
-            console.log(`[ADMIN] User ${socket.user.username} failed a hard server reset attempt.`);
-            socket.emit("error", "Incorrect secret for server reset.");
-        }
-    });
+    socket.on("requestDraw", ({ tableId }) => {
+        const table = state.getTableById(tableId);
+        if (!table || table.drawRequest.isActive || table.state !== 'Playing Phase') return;
 
-    socket.on("resetAllTokens", async ({ secret }) => {
-        const correctSecret = "Ben_Celica_2479_Gines";
-        if (secret !== correctSecret) {
-            console.log(`[ADMIN] User ${socket.user.username} failed a token reset attempt.`);
-            return socket.emit("error", "Incorrect secret for token reset.");
-        }
-        try {
-            console.log(`[ADMIN] User ${socket.user.username} initiated a successful token reset.`);
-            const STARTING_TOKENS = 8.00;
-    
-            await pool.query("TRUNCATE TABLE transactions, game_history RESTART IDENTITY;");
-    
-            const usersResult = await pool.query("SELECT id FROM users;");
-            const allUsers = usersResult.rows;
-    
-            const startingBalancePromises = allUsers.map(user => {
-                return transactionManager.postTransaction(pool, {
-                    userId: user.id,
-                    gameId: null,
-                    type: 'admin_adjustment',
-                    amount: STARTING_TOKENS,
-                    description: `Season Reset - Starting Balance`
-                });
-            });
-            await Promise.all(startingBalancePromises);
-            
-            console.log(`Granted ${STARTING_TOKENS} tokens to ${allUsers.length} users.`);
-    
-            const allSockets = await io.fetchSockets();
-            for (const sock of allSockets) {
-                const userQuery = "SELECT id, username, email, created_at, wins, losses, washes FROM users WHERE id = $1";
-                const userResult = await pool.query(userQuery, [sock.userId]);
-                const updatedUser = userResult.rows[0];
-    
-                if (updatedUser) {
-                    const tokenQuery = "SELECT SUM(amount) AS current_tokens FROM transactions WHERE user_id = $1";
-                    const tokenResult = await pool.query(tokenQuery, [sock.userId]);
-                    updatedUser.tokens = parseFloat(tokenResult.rows[0].current_tokens || 0).toFixed(2);
-                    
-                    sock.emit("updateUser", updatedUser);
-                }
+        table.drawRequest.isActive = true;
+        table.drawRequest.initiator = socket.username;
+        table.drawRequest.votes = {};
+        const activePlayers = Object.values(table.players).filter(p => !p.isSpectator);
+        activePlayers.forEach(p => {
+            table.drawRequest.votes[p.playerName] = (p.playerName === socket.username) ? 'wash' : null;
+        });
+
+        table.drawRequest.timer = 30;
+        const timerId = setInterval(() => {
+            const currentTable = state.getTableById(tableId);
+            if (!currentTable || !currentTable.drawRequest.isActive) {
+                clearInterval(timerId);
+                return;
             }
-            emitLobbyUpdate();
+            currentTable.drawRequest.timer -= 1;
+            if (currentTable.drawRequest.timer <= 0) {
+                clearInterval(timerId);
+                currentTable.drawRequest.isActive = false;
+                io.to(tableId).emit("gameState", currentTable);
+                io.to(tableId).emit("notification", { message: "Draw request timed out. Game resumes." });
+            } else {
+                emitTableUpdate(tableId);
+            }
+        }, 1000);
+        emitTableUpdate(tableId);
+    });
+
+    socket.on("submitDrawVote", async ({ tableId, vote }) => {
+        const table = state.getTableById(tableId);
+        if (!table || !table.drawRequest.isActive || !['wash', 'split', 'no'].includes(vote) || table.drawRequest.votes[socket.username] !== null) return;
+        
+        table.drawRequest.votes[socket.username] = vote;
     
-        } catch (err) {
-            console.error("Error during token reset:", err);
-            socket.emit("error", "Server error during token reset.");
+        if (vote === 'no') {
+            table.drawRequest.isActive = false;
+            emitTableUpdate(tableId);
+            io.to(tableId).emit("notification", { message: `${socket.username} vetoed the draw. Game resumes.` });
+            return;
         }
+    
+        const allVotes = Object.values(table.drawRequest.votes);
+        if (allVotes.every(v => v !== null)) {
+            table.drawRequest.isActive = false;
+            
+            const voteCounts = allVotes.reduce((acc, v) => { acc[v] = (acc[v] || 0) + 1; return acc; }, {});
+            const tableCost = TABLE_COSTS[table.theme] || 0;
+            const activePlayers = Object.values(table.players).filter(p => !p.isSpectator);
+            let outcomeMessage = "Draw resolved.";
+            const transactionPromises = [];
+    
+            if (voteCounts.wash === activePlayers.length) {
+                outcomeMessage = "All players agreed to a wash. All buy-ins returned.";
+                activePlayers.forEach(p => {
+                    transactionPromises.push(transactionManager.postTransaction(pool, { userId: p.userId, gameId: table.gameId, type: 'wash_payout', amount: tableCost, description: `Draw Outcome: Wash` }));
+                });
+            } else if (voteCounts.wash > 0 && voteCounts.split > 0) {
+                outcomeMessage = "A split was agreed upon. Payouts calculated by score.";
+                const payoutResult = gameLogic.calculateDrawSplitPayout(table);
+                if (payoutResult && payoutResult.payouts) {
+                    for (const playerName in payoutResult.payouts) {
+                        const pData = payoutResult.payouts[playerName];
+                        transactionPromises.push(transactionManager.postTransaction(pool, { userId: pData.userId, gameId: table.gameId, type: 'win_payout', amount: pData.totalReturn, description: `Draw Outcome: Split` }));
+                    }
+                }
+            } else {
+                outcomeMessage = "The draw resulted in a wash. All buy-ins returned.";
+                activePlayers.forEach(p => {
+                    transactionPromises.push(transactionManager.postTransaction(pool, { userId: p.userId, gameId: table.gameId, type: 'wash_payout', amount: tableCost, description: `Draw Outcome: Wash (Default)` }));
+                });
+            }
+            
+            await Promise.all(transactionPromises);
+            await transactionManager.updateGameRecordOutcome(pool, table.gameId, outcomeMessage);
+    
+            table.state = "Game Over";
+            table.roundSummary = { message: outcomeMessage, isGameOver: true, finalScores: table.scores };
+            emitTableUpdate(tableId);
+            setTimeout(() => state.resetTable(tableId, pool, { emitTableUpdate, emitLobbyUpdate }), 5000);
+        } else {
+            emitTableUpdate(tableId);
+        }
+    });
+
+    socket.on("resetGame", async ({ tableId }) => {
+        await state.resetTable(tableId, pool, { emitTableUpdate, emitLobbyUpdate });
     });
 
     socket.on("disconnect", (reason) => {
         const userId = socket.userId;
         if (!userId) return;
-        console.log(`Socket disconnected for user ID: ${userId}, Reason: ${reason}`);
         const table = Object.values(state.getAllTables()).find(t => t.players[userId]);
         if (table) {
             const playerInfo = table.players[userId];
@@ -734,11 +706,6 @@ io.on("connection", (socket) => {
             emitTableUpdate(table.tableId);
             emitLobbyUpdate();
         }
-    });
-
-    socket.on("resetGame", async ({ tableId }) => {
-        // FIX: Await the async function and pass the database pool
-        await state.resetTable(tableId, pool, { emitTableUpdate, emitLobbyUpdate });
     });
 });
 
@@ -756,7 +723,6 @@ server.listen(PORT, async () => {
     console.log("✅ Database connection successful.");
     await createDbTables(pool);
     
-    // Setup routes
     const authRoutes = createAuthRoutes(pool, bcrypt, jwt);
     app.use('/api/auth', authRoutes);
 

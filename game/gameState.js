@@ -42,8 +42,13 @@ function getInitialGameData(tableId, theme) {
         playersWhoPassedThisRound: [], playerMode: null, serverVersion: SERVER_VERSION,
         insurance: getInitialInsuranceState(),
         forfeiture: getInitialForfeitureState(),
-        // FIX: Ensure playerTokens is initialized
         playerTokens: {},
+        drawRequest: {
+            isActive: false,
+            initiator: null,
+            votes: {},
+            timer: null
+        }
     };
 }
 
@@ -69,6 +74,7 @@ function initializeNewRoundState(table) {
         lastCompletedTrick: null, playersWhoPassedThisRound: [], 
         insurance: getInitialInsuranceState(),
         forfeiture: getInitialForfeitureState(),
+        drawRequest: { isActive: false, initiator: null, votes: {}, timer: null }
     });
     table.playerOrderActive.forEach(pName => {
         if (pName && table.scores[pName] !== undefined) {
@@ -77,7 +83,6 @@ function initializeNewRoundState(table) {
     });
 }
 
-// FIX: The entire resetTable function is updated to be async and to correctly handle state.
 async function resetTable(tableId, pool, emitters) {
     const { emitTableUpdate, emitLobbyUpdate } = emitters;
     const table = tables[tableId];
@@ -87,7 +92,6 @@ async function resetTable(tableId, pool, emitters) {
     const themeId = table.theme;
     const theme = THEMES.find(t => t.id === themeId) || { id: 'default', name: 'Default' };
     
-    // Create a fresh table state
     tables[tableId] = getInitialGameData(tableId, theme);
     const newTable = tables[tableId];
 
@@ -95,7 +99,6 @@ async function resetTable(tableId, pool, emitters) {
     const playerIdsToKeep = [];
     for (const userId in originalPlayers) {
         const playerInfo = originalPlayers[userId];
-        // Only keep players who are not disconnected
         if (!playerInfo.disconnected) {
             newTable.players[userId] = { ...playerInfo, isSpectator: false };
             newTable.scores[playerInfo.playerName] = 120;
@@ -107,12 +110,10 @@ async function resetTable(tableId, pool, emitters) {
     }
     
     newTable.playerOrderActive = activePlayerNames;
-    // FIX: gameStarted must be false. The game is ready, but it has not started.
     newTable.gameStarted = false; 
     newTable.playerMode = activePlayerNames.length;
     newTable.state = activePlayerNames.length >= 3 ? "Ready to Start" : "Waiting for Players";
 
-    // FIX: Re-fetch and attach token balances for the remaining players.
     try {
         if (playerIdsToKeep.length > 0) {
             const tokenQuery = `SELECT user_id, SUM(amount) as tokens FROM transactions WHERE user_id = ANY($1::int[]) GROUP BY user_id;`;
