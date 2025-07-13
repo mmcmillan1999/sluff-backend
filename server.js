@@ -70,6 +70,54 @@ const dealCards = (players) => {
     return { hands, widow };
 };
 
+/**
+ * [BAND-AID FIX]
+ * This function handles advancing the game after a round is skipped because all players passed.
+ * It's designed to be called from a setTimeout within the gameLogic module, where the server's
+ * scope isn't directly available. It finds the stalled table and prepares it for the next round.
+ */
+const prepareNextRound = () => {
+    // Find the table that needs advancing because a round was skipped.
+    const tableToAdvance = Object.values(state.getAllTables()).find(t => t.state === "Round Skipped");
+
+    if (!tableToAdvance) {
+        // This can happen if another event changes the state before the timeout fires.
+        // It's not an error, so we just log it and move on.
+        console.log("[prepareNextRound] No table found in 'Round Skipped' state. Ignoring.");
+        return;
+    }
+
+    const table = tableToAdvance;
+    const tableId = table.tableId;
+    console.log(`[prepareNextRound] Automatically advancing skipped round for table ${tableId}`);
+
+    // --- Rotate the dealer and player order ---
+    // The player to the left of the dealer (first in play order) becomes the new dealer.
+    const newPlayerOrderActive = [...table.playerOrderActive];
+    const newDealerName = newPlayerOrderActive.shift(); // The first player in the order becomes the new dealer.
+    newPlayerOrderActive.push(newDealerName); // Move them to the end of the order for the next round.
+    table.playerOrderActive = newPlayerOrderActive;
+
+    // Find the full player object for the new dealer to get their userId.
+    const newDealer = Object.values(table.players).find(p => p.playerName === newDealerName);
+    if (!newDealer) {
+        console.error(`[prepareNextRound] FATAL: Could not find player object for new dealer: ${newDealerName} on table ${tableId}. Resetting table.`);
+        // As a fallback, reset the entire table to a safe state.
+        state.resetTable(tableId, pool, { emitTableUpdate, emitLobbyUpdate });
+        return;
+    }
+    table.dealer = newDealer.userId;
+
+    // --- Reset the table for the new round ---
+    state.initializeNewRoundState(table);
+    table.state = "Dealing Pending"; // Set state to allow the new dealer to deal.
+
+    // --- Notify clients of the update ---
+    console.log(`[prepareNextRound] Table ${tableId} advanced. New dealer is ${newDealerName}. State is now 'Dealing Pending'.`);
+    emitTableUpdate(tableId);
+};
+
+
 async function resolveForfeit(tableId, forfeitingPlayerName, reason) {
     const table = state.getTableById(tableId);
     if (!table || table.state === "Game Over" || !table.gameId) return;
@@ -438,7 +486,7 @@ io.on("connection", (socket) => {
         const { id, username } = socket.user;
         if (!table || username !== table.biddingTurnPlayerName) return;
         
-        const helpers = { resetTable: (id) => state.resetTable(id, pool, { emitTableUpdate, emitLobbyUpdate }), getPlayerNameByUserId, initializeNewRoundState: state.initializeNewRoundState, shuffle };
+        const helpers = { resetTable: (id) => state.resetTable(id, pool, { emitTableUpdate, emitLobbyUpdate }), getPlayerNameByUserId, initializeNewRoundState: state.initializeNewRoundState, shuffle, prepareNextRound };
 
         if (table.state === "Awaiting Frog Upgrade Decision") {
             if (id !== table.originalFrogBidderId || (bid !== "Heart Solo" && bid !== "Pass")) return;
@@ -737,4 +785,4 @@ server.listen(PORT, async () => {
     console.error("❌ DATABASE CONNECTION FAILED:", err);
     process.exit(1);
   }
-})
+});
