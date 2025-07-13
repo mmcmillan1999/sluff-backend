@@ -1,5 +1,6 @@
 // backend/game/gameState.js
 
+const Table = require('./Table'); // Import the new Table class
 const { SERVER_VERSION, TABLE_COSTS } = require('./constants');
 
 let tables = {};
@@ -10,151 +11,56 @@ const THEMES = [
     { id: 'dans-deck', name: "Dan's Deck", count: 10 },
 ];
 
-function getInitialInsuranceState() {
-    return {
-        isActive: false, bidMultiplier: null, bidderPlayerName: null, bidderRequirement: 0,
-        defenderOffers: {}, dealExecuted: false, executedDetails: null
-    };
-}
-
-function getInitialForfeitureState() {
-    return {
-        targetPlayerName: null,
-        timeLeft: null,
-    };
-}
-
-function getInitialGameData(tableId, theme) {
-    const themeIndex = THEMES.findIndex(t => t.id === theme.id);
-    const baseCount = themeIndex > 0 ? THEMES.slice(0, themeIndex).reduce((acc, t) => acc + t.count, 0) : 0;
-    const tableNumber = parseInt(tableId.split('-')[1], 10) - baseCount;
-    const tableName = `${theme.name} ${tableNumber}`;
-
-    return {
-        tableId: tableId, tableName: tableName, theme: theme.id, state: "Waiting for Players",
-        players: {}, playerOrderActive: [], dealer: null, hands: {}, widow: [],
-        originalDealtWidow: [], widowDiscardsForFrogBidder: [], scores: {}, bidsThisRound: [],
-        currentHighestBidDetails: null, biddingTurnPlayerName: null, bidsMadeCount: 0,
-        originalFrogBidderId: null, soloBidMadeAfterFrog: false, trumpSuit: null,
-        bidWinnerInfo: null, gameStarted: false, currentTrickCards: [], trickTurnPlayerName: null,
-        tricksPlayedCount: 0, leadSuitCurrentTrick: null, trumpBroken: false, trickLeaderName: null,
-        capturedTricks: {}, roundSummary: null, revealedWidowForFrog: [], lastCompletedTrick: null,
-        playersWhoPassedThisRound: [], playerMode: null, serverVersion: SERVER_VERSION,
-        insurance: getInitialInsuranceState(),
-        forfeiture: getInitialForfeitureState(),
-        playerTokens: {},
-        drawRequest: {
-            isActive: false,
-            initiator: null,
-            votes: {},
-            timer: null
-        }
-    };
-}
-
-function initializeGameTables() {
+/**
+ * Creates instances of the Table class for each defined theme.
+ * This is the factory that builds our game world.
+ * @param {object} io - The main socket.io server instance.
+ * @param {object} pool - The PostgreSQL connection pool.
+ */
+function initializeGameTables(io, pool) {
     let tableCounter = 1;
+
+    const emitLobbyUpdate = () => {
+        io.emit("lobbyState", getLobbyState());
+    };
+
     THEMES.forEach(theme => {
         for (let i = 0; i < theme.count; i++) {
             const tableId = `table-${tableCounter}`;
-            tables[tableId] = getInitialGameData(tableId, theme);
+            const tableNumber = i + 1;
+            const tableName = `${theme.name} #${tableNumber}`;
+            
+            // Create a new instance of our Table class
+            tables[tableId] = new Table(tableId, theme.id, tableName, io, pool, emitLobbyUpdate);
             tableCounter++;
         }
     });
-    console.log(`${tableCounter - 1} in-memory game tables initialized.`);
+    console.log(`${tableCounter - 1} in-memory game tables initialized using Table class.`);
 }
 
-function initializeNewRoundState(table) {
-    Object.assign(table, {
-        hands: {}, widow: [], originalDealtWidow: [], widowDiscardsForFrogBidder: [], bidsThisRound: [],
-        currentHighestBidDetails: null, trumpSuit: null, bidWinnerInfo: null, biddingTurnPlayerName: null,
-        bidsMadeCount: 0, originalFrogBidderId: null, soloBidMadeAfterFrog: false, currentTrickCards: [],
-        trickTurnPlayerName: null, tricksPlayedCount: 0, leadSuitCurrentTrick: null, trumpBroken: false,
-        trickLeaderName: null, capturedTricks: {}, roundSummary: null, revealedWidowForFrog: [],
-        lastCompletedTrick: null, playersWhoPassedThisRound: [], 
-        insurance: getInitialInsuranceState(),
-        forfeiture: getInitialForfeitureState(),
-        drawRequest: { isActive: false, initiator: null, votes: {}, timer: null }
-    });
-    table.playerOrderActive.forEach(pName => {
-        if (pName && table.scores[pName] !== undefined) {
-            table.capturedTricks[pName] = [];
-        }
-    });
+function getTableById(tableId) {
+    return tables[tableId];
 }
 
-async function resetTable(tableId, pool, emitters) {
-    const { emitTableUpdate, emitLobbyUpdate } = emitters;
-    const table = tables[tableId];
-    if (!table) return;
-
-    const originalPlayers = { ...table.players };
-    const themeId = table.theme;
-    const theme = THEMES.find(t => t.id === themeId) || { id: 'default', name: 'Default' };
-    
-    tables[tableId] = getInitialGameData(tableId, theme);
-    const newTable = tables[tableId];
-
-    const activePlayerNames = [];
-    const playerIdsToKeep = [];
-    for (const userId in originalPlayers) {
-        const playerInfo = originalPlayers[userId];
-        if (!playerInfo.disconnected) {
-            newTable.players[userId] = { ...playerInfo, isSpectator: false };
-            newTable.scores[playerInfo.playerName] = 120;
-            if (!playerInfo.isSpectator) {
-                activePlayerNames.push(playerInfo.playerName);
-                playerIdsToKeep.push(playerInfo.userId);
-            }
-        }
-    }
-    
-    newTable.playerOrderActive = activePlayerNames;
-    newTable.gameStarted = false; 
-    newTable.playerMode = activePlayerNames.length;
-    newTable.state = activePlayerNames.length >= 3 ? "Ready to Start" : "Waiting for Players";
-
-    try {
-        if (playerIdsToKeep.length > 0) {
-            const tokenQuery = `SELECT user_id, SUM(amount) as tokens FROM transactions WHERE user_id = ANY($1::int[]) GROUP BY user_id;`;
-            const tokenResult = await pool.query(tokenQuery, [playerIdsToKeep]);
-            
-            const playerTokens = {};
-            const userIdToNameMap = Object.values(newTable.players).reduce((acc, player) => {
-                acc[player.userId] = player.playerName;
-                return acc;
-            }, {});
-
-            tokenResult.rows.forEach(row => {
-                const playerName = userIdToNameMap[row.user_id];
-                if (playerName) {
-                    playerTokens[playerName] = parseFloat(row.tokens || 0).toFixed(2);
-                }
-            });
-            newTable.playerTokens = playerTokens;
-        }
-    } catch (err) {
-        console.error(`Error fetching tokens during table reset for table ${tableId}:`, err);
-    }
-
-    emitTableUpdate(tableId);
-    emitLobbyUpdate();
+function getAllTables() {
+    return tables;
 }
 
-function getTableById(tableId) { return tables[tableId]; }
-function getAllTables() { return tables; }
-
+/**
+ * Gathers the state of all tables for the main lobby view.
+ * It calls the getStateForClient method on each table instance.
+ */
 function getLobbyState() {
     const groupedByTheme = THEMES.map(theme => {
         const themeTables = Object.values(tables)
-            .filter(table => table.theme === theme.id)
-            .map(table => {
-                const allPlayers = Object.values(table.players);
-                const activePlayers = allPlayers.filter(p => !p.isSpectator);
+            .filter(tableInstance => tableInstance.theme === theme.id)
+            .map(tableInstance => {
+                const clientState = tableInstance.getStateForClient(); // Get the serializable state
+                const activePlayers = Object.values(clientState.players).filter(p => !p.isSpectator);
                 return {
-                    tableId: table.tableId,
-                    tableName: table.tableName,
-                    state: table.state,
+                    tableId: clientState.tableId,
+                    tableName: clientState.tableName,
+                    state: clientState.state,
                     playerCount: activePlayers.length,
                     playerNames: activePlayers.map(p => p.playerName)
                 };
@@ -170,6 +76,8 @@ function getLobbyState() {
 }
 
 module.exports = {
-    initializeGameTables, initializeNewRoundState, resetTable,
-    getTableById, getAllTables, getLobbyState,
+    initializeGameTables,
+    getTableById,
+    getAllTables,
+    getLobbyState,
 };
