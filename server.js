@@ -30,23 +30,18 @@ app.use(cors({ origin: "*" }));
 app.use(express.json());
 
 const emitLobbyUpdate = () => {
-    // console.log("Emitting lobby update to all clients.");
     io.emit("lobbyState", state.getLobbyState());
 };
 
 const emitTableUpdate = (tableId) => {
     const table = state.getTableById(tableId);
     if (table) {
-        // console.log(`Emitting table update for tableId: ${tableId}`);
         io.to(tableId).emit("gameState", table);
-    } else {
-        // console.log(`Attempted to emit update for non-existent tableId: ${tableId}`);
     }
 };
 
 const getPlayerNameByUserId = (userId, table) => {
     if (!table || !table.players || !table.players[userId]) {
-        // console.log(`Could not find player name for userId: ${userId} in the provided table.`);
         return String(userId);
     }
     return table.players[userId].playerName;
@@ -316,68 +311,34 @@ io.on("connection", (socket) => {
 
         socket.join(tableId);
         socket.emit("joinedTable", { tableId, gameState: table });
-        emitTableUpdate(tableId);
-        emitLobbyUpdate();
-    });
-
-    socket.on("startGame", async ({ tableId }) => {
-        const table = state.getTableById(tableId);
-        if (!table || table.gameStarted) return;
-        
-        const activePlayers = Object.values(table.players).filter(p => !p.isSpectator && !p.disconnected);
-        if (activePlayers.length < 3) return socket.emit("error", "Need at least 3 players to start.");
-
-        const tableCost = TABLE_COSTS[table.theme] || 0;
-        
-        table.playerMode = activePlayers.length;
 
         try {
-            const gameId = await transactionManager.createGameRecord(pool, table);
-            table.gameId = gameId;
+            const playerIds = Object.keys(table.players).map(Number);
+            if (playerIds.length > 0) {
+                const tokenQuery = `SELECT user_id, SUM(amount) as tokens FROM transactions WHERE user_id = ANY($1::int[]) GROUP BY user_id;`;
+                const tokenResult = await pool.query(tokenQuery, [playerIds]);
+                
+                const playerTokens = {};
+                const userIdToNameMap = Object.values(table.players).reduce((acc, player) => {
+                    acc[player.userId] = player.playerName;
+                    return acc;
+                }, {});
 
-            const buyInPromises = activePlayers.map(player => {
-                return transactionManager.postTransaction(pool, {
-                    userId: player.userId, gameId: gameId, type: 'buy_in',
-                    amount: -tableCost, description: `Buy-in for game on table ${table.tableName}`
+                tokenResult.rows.forEach(row => {
+                    const playerName = userIdToNameMap[row.user_id];
+                    if (playerName) {
+                        playerTokens[playerName] = parseFloat(row.tokens || 0).toFixed(2);
+                    }
                 });
-            });
-            await Promise.all(buyInPromises);
-            
-            activePlayers.forEach(player => {
-                const playerSocket = io.sockets.sockets.get(player.socketId);
-                if (playerSocket) playerSocket.emit("requestUserSync");
-            });
-
+                table.playerTokens = playerTokens;
+            }
         } catch (err) {
-            console.error("Database error during startGame transaction processing:", err);
-            io.to(tableId).emit("error", "A server error occurred during buy-in. Could not start game.");
-            table.playerMode = null; 
-            return;
+            console.error(`Error fetching tokens on join for table ${tableId}:`, err);
         }
-        
-        table.gameStarted = true;
-        
-        activePlayers.forEach(p => { if (table.scores[p.playerName] === undefined) table.scores[p.playerName] = 120; });
-        if (table.playerMode === 3 && table.scores[PLACEHOLDER_ID] === undefined) {
-            table.scores[PLACEHOLDER_ID] = 120;
-        }
-        const shuffledPlayerIds = shuffle(activePlayers.map(p => p.userId));
-        table.dealer = shuffledPlayerIds[0];
-        const dealerIndex = shuffledPlayerIds.indexOf(table.dealer);
-        table.playerOrderActive = [];
-        const numPlayers = shuffledPlayerIds.length;
-        for (let i = 1; i <= numPlayers; i++) {
-            const playerIndex = (dealerIndex + i) % numPlayers;
-            const playerId = shuffledPlayerIds[playerIndex];
-            if (table.playerMode === 4 && playerId === table.dealer) continue;
-            table.playerOrderActive.push(getPlayerNameByUserId(playerId, table));
-        }
-        state.initializeNewRoundState(table);
-        table.state = "Dealing Pending";
+
         emitTableUpdate(tableId);
         emitLobbyUpdate();
     });
-
 
     socket.on("leaveTable", async ({ tableId }) => {
         const table = state.getTableById(tableId);
@@ -399,6 +360,39 @@ io.on("connection", (socket) => {
         emitLobbyUpdate();
     });
 
+    socket.on('startGame', async ({ tableId }) => {
+        const table = state.getTableById(tableId);
+        if (!table) {
+            socket.emit('gameStartError', { message: 'Table not found.' });
+            return;
+        }
+
+        const activePlayerIds = Object.values(table.players)
+            .filter(p => !p.isSpectator && p.userId)
+            .map(p => p.userId);
+
+        if (activePlayerIds.length !== 3) {
+            socket.emit('gameStartError', { message: 'Game requires exactly 3 players to start.' });
+            return;
+        }
+
+        try {
+            const gameId = await transactionManager.createGameRecord(pool, table);
+            table.gameId = gameId;
+
+            await transactionManager.handleGameStartTransaction(pool, activePlayerIds, gameId);
+
+            state.initializeNewRoundState(table);
+            table.state = "Dealing Pending"; 
+
+            emitTableUpdate(tableId);
+            console.log(`Game ${gameId} successfully started on table ${tableId}`);
+
+        } catch (error) {
+            socket.emit('gameStartError', { message: error.message || 'An error occurred while starting the game.' });
+            console.error(`Failed to start game on table ${tableId}:`, error.message);
+        }
+    });
 
     socket.on("dealCards", ({ tableId }) => {
         const table = state.getTableById(tableId);
@@ -682,7 +676,6 @@ io.on("connection", (socket) => {
         }
     });
 
-
     socket.on("disconnect", (reason) => {
         const userId = socket.userId;
         if (!userId) return;
@@ -734,4 +727,4 @@ server.listen(PORT, async () => {
     console.error("❌ DATABASE CONNECTION FAILED:", err);
     process.exit(1);
   }
-});
+})

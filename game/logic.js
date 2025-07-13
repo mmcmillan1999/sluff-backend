@@ -159,7 +159,6 @@ async function calculateRoundScores(table, io, pool) {
         }
     }
 
-    // --- THIS IS THE FIX: Re-adding the hindsight calculation ---
     if (playerMode === 3) {
         insuranceHindsight = {};
         const defenders = playerOrderActive.filter(p => p !== bidWinnerName);
@@ -260,13 +259,37 @@ async function calculateRoundScores(table, io, pool) {
         }
     }
 
+    // --- NEW LOGIC START ---
+    // After all transactions, fetch the new token balances for all players at the table.
+    const playerIds = Object.keys(table.players).map(id => Number(id));
+    const playerTokens = {};
+
+    if (playerIds.length > 0) {
+        const tokenQuery = `SELECT user_id, SUM(amount) as tokens FROM transactions WHERE user_id = ANY($1::int[]) GROUP BY user_id;`;
+        const tokenResult = await pool.query(tokenQuery, [playerIds]);
+
+        const userIdToNameMap = Object.values(table.players).reduce((acc, player) => {
+            acc[player.userId] = player.playerName;
+            return acc;
+        }, {});
+
+        tokenResult.rows.forEach(row => {
+            const playerName = userIdToNameMap[row.user_id];
+            if (playerName) {
+                playerTokens[playerName] = parseFloat(row.tokens || 0).toFixed(2);
+            }
+        });
+    }
+    // --- NEW LOGIC END ---
+
     table.roundSummary = {
         message: roundMessage, finalScores: { ...scores }, isGameOver,
         gameWinner: gameWinnerName, dealerOfRoundId: table.dealer, widowForReveal,
         insuranceDealWasMade: insurance.dealExecuted, 
         insuranceDetails: insurance.dealExecuted ? insurance.executedDetails : null,
-        insuranceHindsight: insuranceHindsight, // <-- Now correctly included
-        allTricks: table.capturedTricks
+        insuranceHindsight: insuranceHindsight,
+        allTricks: table.capturedTricks,
+        playerTokens: playerTokens // Attach the new token data
     };
     
     table.state = isGameOver ? "Game Over" : "Awaiting Next Round Trigger";
