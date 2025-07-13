@@ -1,19 +1,11 @@
 // backend/db/transactionManager.js
 
-/**
- * Creates a new record in the game_history table.
- * This should be called once when a new game officially starts.
- * @param {object} pool - The PostgreSQL connection pool.
- * @param {object} table - The in-memory table object from gameState.
- * @returns {Promise<number>} The game_id of the newly created game record.
- */
 const createGameRecord = async (pool, table) => {
     const query = `
         INSERT INTO game_history (table_id, theme, player_count, outcome)
         VALUES ($1, $2, $3, $4)
         RETURNING game_id;
     `;
-    // The initial outcome is 'In Progress'
     const values = [table.tableId, table.theme, table.playerMode, 'In Progress'];
     try {
         const result = await pool.query(query, values);
@@ -25,17 +17,8 @@ const createGameRecord = async (pool, table) => {
     }
 };
 
-/**
- * Posts a single financial transaction to the transactions ledger.
- * @param {object} pool - The PostgreSQL connection pool.
- * @param {number} userId - The ID of the user for the transaction.
- * @param {number} gameId - The ID of the game this transaction is related to.
- * @param {string} type - The type of transaction (e.g., 'buy_in', 'win_payout').
- * @param {number} amount - The transaction amount (negative for debit, positive for credit).
- * @param {string} description - A brief description of the transaction.
- * @returns {Promise<object>} The newly created transaction record.
- */
 const postTransaction = async (pool, { userId, gameId, type, amount, description }) => {
+    // This function remains unchanged as it was already correct.
     const query = `
         INSERT INTO transactions (user_id, game_id, transaction_type, amount, description)
         VALUES ($1, $2, $3, $4, $5)
@@ -52,12 +35,6 @@ const postTransaction = async (pool, { userId, gameId, type, amount, description
     }
 };
 
-/**
- * Updates a game record when the game has concluded.
- * @param {object} pool - The PostgreSQL connection pool.
- * @param {number} gameId - The ID of the game to update.
- * @param {string} outcome - The final outcome message of the game.
- */
 const updateGameRecordOutcome = async (pool, gameId, outcome) => {
     const query = `
         UPDATE game_history
@@ -82,16 +59,17 @@ const handleGameStartTransaction = async (pool, playerIds, gameId) => {
         await client.query('BEGIN');
 
         // Step 1: Verify all players have sufficient tokens
-        const balanceQuery = `SELECT user_id, tokens FROM users WHERE user_id = ANY($1::int[]) FOR UPDATE;`;
+        // FIX: Changed user_id to id to match the 'users' table schema
+        const balanceQuery = `SELECT id, tokens FROM users WHERE id = ANY($1::int[]) FOR UPDATE;`;
         const balanceResult = await client.query(balanceQuery, [playerIds]);
-
+        
         if (balanceResult.rows.length !== 3) {
             throw new Error("Could not find all players for transaction.");
         }
 
         for (const player of balanceResult.rows) {
-            if (parseFloat(player.tokens) < 1.00) { // Assuming a cost of 1 token
-                throw new Error(`Player ${player.user_id} has insufficient tokens.`);
+            if (parseFloat(player.tokens) < 1.00) { 
+                throw new Error(`Player with ID ${player.id} has insufficient tokens.`);
             }
         }
 
@@ -100,14 +78,16 @@ const handleGameStartTransaction = async (pool, playerIds, gameId) => {
         const description = `Table buy-in for game #${gameId}`;
 
         const transactionPromises = playerIds.map(userId => {
-            const insertQuery = `INSERT INTO transactions(user_id, game_id, type, amount, description) VALUES($1, $2, 'buy_in', $3, $4);`;
-            const updateQuery = `UPDATE users SET tokens = tokens + $1 WHERE user_id = $2;`;
+            // The 'transactions' table correctly uses 'user_id', so this is unchanged.
+            const insertQuery = `INSERT INTO transactions(user_id, game_id, transaction_type, amount, description) VALUES($1, $2, 'buy_in', $3, $4);`;
+            // FIX: Changed user_id to id for the 'users' table update
+            const updateQuery = `UPDATE users SET tokens = tokens + $1 WHERE id = $2;`;
             return Promise.all([
                 client.query(insertQuery, [userId, gameId, cost, description]),
                 client.query(updateQuery, [cost, userId])
             ]);
         });
-
+        
         await Promise.all(transactionPromises);
 
         await client.query('COMMIT');
@@ -116,16 +96,31 @@ const handleGameStartTransaction = async (pool, playerIds, gameId) => {
     } catch (error) {
         await client.query('ROLLBACK');
         console.error("❌ Game start transaction failed and was rolled back:", error.message);
-        throw error; // Re-throw the error to be handled by the server
+        throw error;
     } finally {
         client.release();
     }
 };
 
+const awardWinnings = async (pool, winnerId, potSize, gameId) => {
+    if (!winnerId || potSize <= 0) {
+        console.log("No winner or empty pot, skipping payout transaction.");
+        return;
+    }
+    await postTransaction(pool, {
+        userId: winnerId,
+        gameId: gameId,
+        type: 'win_payout',
+        amount: potSize,
+        description: `Winnings for game #${gameId}`
+    });
+    console.log(`✅ Payout of ${potSize} tokens successful for user ${winnerId} in game ${gameId}`);
+};
 
 module.exports = {
     createGameRecord,
     postTransaction,
     updateGameRecordOutcome,
     handleGameStartTransaction,
+    awardWinnings
 };
