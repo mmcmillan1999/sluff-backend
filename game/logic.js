@@ -21,6 +21,7 @@ const calculateCardPoints = (cardsArray) => {
 
 // --- CORE LOGIC FUNCTIONS ---
 
+// FIX: Corrected to provide all necessary details for the frontend modal.
 function calculateForfeitPayout(table, forfeitingPlayerName) {
     const remainingPlayers = Object.values(table.players).filter(p => 
         !p.isSpectator && 
@@ -30,12 +31,13 @@ function calculateForfeitPayout(table, forfeitingPlayerName) {
     if (remainingPlayers.length === 0) return {};
 
     const tableBuyIn = TABLE_COSTS[table.theme] || 0;
-    const totalPayout = tableBuyIn * remainingPlayers.length;
     const forfeitShare = tableBuyIn / remainingPlayers.length;
 
     const payoutDetails = {};
     remainingPlayers.forEach(player => {
         payoutDetails[player.playerName] = {
+            buyInReturned: tableBuyIn,
+            forfeitShare: forfeitShare,
             totalGain: Math.round((tableBuyIn + forfeitShare) * 100) / 100,
         };
     });
@@ -259,8 +261,6 @@ async function calculateRoundScores(table, io, pool) {
         }
     }
 
-    // --- NEW LOGIC START ---
-    // After all transactions, fetch the new token balances for all players at the table.
     const playerIds = Object.keys(table.players).map(id => Number(id));
     const playerTokens = {};
 
@@ -280,7 +280,6 @@ async function calculateRoundScores(table, io, pool) {
             }
         });
     }
-    // --- NEW LOGIC END ---
 
     table.roundSummary = {
         message: roundMessage, finalScores: { ...scores }, isGameOver,
@@ -289,9 +288,12 @@ async function calculateRoundScores(table, io, pool) {
         insuranceDetails: insurance.dealExecuted ? insurance.executedDetails : null,
         insuranceHindsight: insuranceHindsight,
         allTricks: table.capturedTricks,
-        playerTokens: playerTokens // Attach the new token data
+        playerTokens: playerTokens 
     };
     
+    // FIX: Ensure the main table state also has the latest token counts for immediate UI updates.
+    table.playerTokens = playerTokens;
+
     table.state = isGameOver ? "Game Over" : "Awaiting Next Round Trigger";
     io.to(table.tableId).emit("gameState", table);
 }

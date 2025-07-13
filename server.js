@@ -367,22 +367,19 @@ io.on("connection", (socket) => {
         
         const activePlayers = Object.values(table.players).filter(p => !p.isSpectator && !p.disconnected);
         if (activePlayers.length < 3) {
-            return socket.emit("error", "Need at least 3 players to start.");
+            return socket.emit("error", { message: "Need at least 3 players to start." });
         }
         
-        // FIX: Set playerMode and get IDs before database calls
         table.playerMode = activePlayers.length;
         const activePlayerIds = activePlayers.map(p => p.userId);
         
         try {
-            // Now create the record, after playerMode is set
             const gameId = await transactionManager.createGameRecord(pool, table);
             table.gameId = gameId;
 
-            // Use the robust transaction handler
+            // FIX: Pass only the active player IDs and game ID to the robust transaction handler
             await transactionManager.handleGameStartTransaction(pool, activePlayerIds, gameId);
             
-            // Set up the rest of the game state
             table.gameStarted = true;
             activePlayers.forEach(p => { if (table.scores[p.playerName] === undefined) table.scores[p.playerName] = 120; });
             if (table.playerMode === 3 && table.scores[PLACEHOLDER_ID] === undefined) {
@@ -424,17 +421,17 @@ io.on("connection", (socket) => {
                 console.error(`Error fetching tokens after game start for table ${tableId}:`, err);
             }
 
-            // Emit the final, updated state
             emitTableUpdate(tableId);
             emitLobbyUpdate();
             console.log(`Game ${gameId} successfully started on table ${tableId}`);
 
         } catch (err) {
-            console.error("Error during startGame:", err);
+            console.error("Error during startGame:", err.message);
             socket.emit("error", { message: err.message || "A server error occurred during buy-in." });
-            // Reset state if start fails
+            
             table.gameStarted = false; 
             table.playerMode = null;
+            table.gameId = null; 
             return;
         }
     });
@@ -561,15 +558,15 @@ io.on("connection", (socket) => {
         if (isLeading) {
             if (playedSuit === table.trumpSuit && !table.trumpBroken) {
                 const isHandAllTrump = hand.every(c => gameLogic.getSuit(c) === table.trumpSuit);
-                if (!isHandAllTrump) return socket.emit("error", "Cannot lead trump until it is broken.");
+                if (!isHandAllTrump) return socket.emit("error", { message: "Cannot lead trump until it is broken." });
             }
         } else {
             const leadCardSuit = table.leadSuitCurrentTrick;
             const hasLeadSuit = hand.some(c => gameLogic.getSuit(c) === leadCardSuit);
-            if (playedSuit !== leadCardSuit && hasLeadSuit) return socket.emit("error", `Must follow suit (${SUITS[leadCardSuit]}).`);
+            if (playedSuit !== leadCardSuit && hasLeadSuit) return socket.emit("error", { message: `Must follow suit (${SUITS[leadCardSuit]}).` });
             if (!hasLeadSuit) {
                 const hasTrump = hand.some(c => gameLogic.getSuit(c) === table.trumpSuit);
-                if (hasTrump && playedSuit !== table.trumpSuit) return socket.emit("error", "You must play trump if you cannot follow suit.");
+                if (hasTrump && playedSuit !== table.trumpSuit) return socket.emit("error", { message: "You must play trump if you cannot follow suit." });
             }
         }
     

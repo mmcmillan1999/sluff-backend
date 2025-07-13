@@ -50,42 +50,49 @@ const updateGameRecordOutcome = async (pool, gameId, outcome) => {
 };
 
 const handleGameStartTransaction = async (pool, playerIds, gameId) => {
-    if (playerIds.length !== 3) {
-        throw new Error("Game start transaction requires exactly 3 players.");
-    }
+    // FIX: This transaction now only accepts an array of player IDs and the game ID.
+    // The cost is hardcoded to -1.00 as per the game rules.
+    const cost = -1.00; 
+    const description = `Table buy-in for game #${gameId}`;
 
     const client = await pool.connect();
     try {
         await client.query('BEGIN');
 
-        // Step 1: Verify all players have sufficient tokens
-        // FIX: Changed user_id to id to match the 'users' table schema
-        const balanceQuery = `SELECT id, tokens FROM users WHERE id = ANY($1::int[]) FOR UPDATE;`;
+        // Step 1: Verify all players have sufficient tokens by querying the transactions table.
+        const balanceQuery = `
+            SELECT user_id, SUM(amount) as current_tokens 
+            FROM transactions 
+            WHERE user_id = ANY($1::int[]) 
+            GROUP BY user_id;
+        `;
         const balanceResult = await client.query(balanceQuery, [playerIds]);
         
-        if (balanceResult.rows.length !== 3) {
-            throw new Error("Could not find all players for transaction.");
-        }
+        // Create a map for easy lookup of player balances.
+        const playerBalances = balanceResult.rows.reduce((acc, row) => {
+            acc[row.user_id] = parseFloat(row.current_tokens);
+            return acc;
+        }, {});
 
-        for (const player of balanceResult.rows) {
-            if (parseFloat(player.tokens) < 1.00) { 
-                throw new Error(`Player with ID ${player.id} has insufficient tokens.`);
+        // Check each player involved in the game.
+        for (const userId of playerIds) {
+            const balance = playerBalances[userId] || 0;
+            if (balance < Math.abs(cost)) {
+                // Find the username for a more helpful error message.
+                const userRes = await client.query('SELECT username FROM users WHERE id = $1', [userId]);
+                const username = userRes.rows[0]?.username || `Player ID ${userId}`;
+                throw new Error(`${username} has insufficient tokens. Needs ${Math.abs(cost)}, but has ${balance.toFixed(2)}.`);
             }
         }
 
-        // Step 2: Deduct tokens and log transactions for each player
-        const cost = -1.00;
-        const description = `Table buy-in for game #${gameId}`;
-
+        // Step 2: Log the 'buy_in' transaction for each player.
+        // There is no need to UPDATE the users table since tokens are derived.
         const transactionPromises = playerIds.map(userId => {
-            // The 'transactions' table correctly uses 'user_id', so this is unchanged.
-            const insertQuery = `INSERT INTO transactions(user_id, game_id, transaction_type, amount, description) VALUES($1, $2, 'buy_in', $3, $4);`;
-            // FIX: Changed user_id to id for the 'users' table update
-            const updateQuery = `UPDATE users SET tokens = tokens + $1 WHERE id = $2;`;
-            return Promise.all([
-                client.query(insertQuery, [userId, gameId, cost, description]),
-                client.query(updateQuery, [cost, userId])
-            ]);
+            const insertQuery = `
+                INSERT INTO transactions(user_id, game_id, transaction_type, amount, description) 
+                VALUES($1, $2, 'buy_in', $3, $4);
+            `;
+            return client.query(insertQuery, [userId, gameId, cost, description]);
         });
         
         await Promise.all(transactionPromises);
@@ -96,7 +103,8 @@ const handleGameStartTransaction = async (pool, playerIds, gameId) => {
     } catch (error) {
         await client.query('ROLLBACK');
         console.error("❌ Game start transaction failed and was rolled back:", error.message);
-        throw error;
+        // Re-throw the error so the calling function in server.js can catch it.
+        throw error; 
     } finally {
         client.release();
     }
@@ -123,4 +131,4 @@ module.exports = {
     updateGameRecordOutcome,
     handleGameStartTransaction,
     awardWinnings
-};
+};  
