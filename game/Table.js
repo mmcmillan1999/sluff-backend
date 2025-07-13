@@ -307,23 +307,45 @@ class Table {
     updateInsuranceSetting(userId, settingType, value) {
         const player = this.players[userId];
         if (!player || !this.insurance.isActive || this.insurance.dealExecuted) return;
+
         const multiplier = this.insurance.bidMultiplier;
         const parsedValue = parseInt(value, 10);
         if (isNaN(parsedValue)) return;
+
+        // Step 1: Update the relevant value in the main state object
         if (settingType === 'bidderRequirement' && player.playerName === this.insurance.bidderPlayerName) {
-            const minReq = -120 * multiplier; const maxReq = 120 * multiplier;
-            if (parsedValue >= minReq && parsedValue <= maxReq) this.insurance.bidderRequirement = parsedValue;
+            const minReq = -120 * multiplier;
+            const maxReq = 120 * multiplier;
+            if (parsedValue >= minReq && parsedValue <= maxReq) {
+                this.insurance.bidderRequirement = parsedValue;
+            }
         } else if (settingType === 'defenderOffer' && this.insurance.defenderOffers.hasOwnProperty(player.playerName)) {
-            const minOffer = -60 * multiplier; const maxOffer = 60 * multiplier;
-            if (parsedValue >= minOffer && parsedValue <= maxOffer) this.insurance.defenderOffers[player.playerName] = parsedValue;
+            const minOffer = -60 * multiplier;
+            const maxOffer = 60 * multiplier;
+            if (parsedValue >= minOffer && parsedValue <= maxOffer) {
+                this.insurance.defenderOffers[player.playerName] = parsedValue;
+            }
+        } else {
+            return; // Exit if the update is not valid
         }
-        const { bidderRequirement, defenderOffers } = this.insurance;
-        if (bidderRequirement <= Object.values(defenderOffers || {}).reduce((sum, offer) => sum + (offer || 0), 0)) {
+
+        // Step 2: Perform the check using the fresh, updated values from `this.insurance`
+        const sumOfOffers = Object.values(this.insurance.defenderOffers || {}).reduce((sum, offer) => sum + (offer || 0), 0);
+        if (this.insurance.bidderRequirement <= sumOfOffers) {
             this.insurance.dealExecuted = true;
-            this.insurance.executedDetails = { agreement: { bidderPlayerName: this.insurance.bidderPlayerName, bidderRequirement, defenderOffers: { ...defenderOffers } } };
+            this.insurance.executedDetails = {
+                agreement: {
+                    bidderPlayerName: this.insurance.bidderPlayerName,
+                    bidderRequirement: this.insurance.bidderRequirement, // Use the fresh value
+                    defenderOffers: { ...this.insurance.defenderOffers } // Use the fresh value
+                }
+            };
         }
+
+        // Step 3: Always emit an update to all clients
         this._emitUpdate();
     }
+
 
     requestDraw(userId) {
         const player = this.players[userId];
@@ -367,11 +389,10 @@ class Table {
     
         const allVotes = Object.values(this.drawRequest.votes);
         if (!allVotes.every(v => v !== null)) {
-            this._emitUpdate(); // Just update the votes, don't resolve yet
+            this._emitUpdate();
             return;
         }
 
-        // --- All votes are in, resolve the draw ---
         clearInterval(this.internalTimers.draw);
         this.drawRequest.isActive = false;
         
@@ -396,7 +417,7 @@ class Table {
                         transactionPromises.push(transactionManager.postTransaction(this.pool, { userId: pData.userId, gameId: this.gameId, type: 'win_payout', amount: pData.totalReturn, description: `Draw Outcome: Split` }));
                     }
                 }
-            } else { // Default to wash if there's no clear majority or only split votes etc.
+            } else {
                 outcomeMessage = "The draw resulted in a wash. All buy-ins returned.";
                 activePlayers.forEach(p => {
                     transactionPromises.push(transactionManager.postTransaction(this.pool, { userId: p.userId, gameId: this.gameId, type: 'wash_payout', amount: tableCost, description: `Draw Outcome: Wash (Default)` }));
@@ -411,13 +432,12 @@ class Table {
             this._emitUpdate();
             this.emitLobbyUpdateCallback();
 
-            // Automatically reset the table after showing the summary
             this.internalTimers.drawReset = setTimeout(() => this.reset(), 10000);
 
         } catch (error) {
             console.error(`[${this.tableId}] Error resolving draw vote:`, error);
             this.io.to(this.tableId).emit("notification", { message: `A server error occurred resolving the draw. Resuming game.` });
-            this.drawRequest = this._getInitialDrawRequestState(); // Reset the draw state
+            this.drawRequest = this._getInitialDrawRequestState();
             this._emitUpdate();
         }
     }
