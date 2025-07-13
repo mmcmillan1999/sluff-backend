@@ -53,8 +53,9 @@ io.on("connection", (socket) => {
     console.log(`Socket connected: ${socket.user.username} (ID: ${socket.user.id}, Socket: ${socket.id})`);
 
     const table = Object.values(state.getAllTables()).find(t => t.players[socket.user.id]);
+    // --- FIX: Pass the entire socket object, not just the socket.id ---
     if (table && table.players[socket.user.id].disconnected) {
-        table.reconnectPlayer(socket.user.id, socket.id);
+        table.reconnectPlayer(socket.user.id, socket);
     }
     
     socket.emit("lobbyState", state.getLobbyState());

@@ -120,12 +120,12 @@ class Table {
         this.emitLobbyUpdateCallback();
     }
     
-    reconnectPlayer(userId, newSocketId) {
+    reconnectPlayer(userId, socket) {
         if (!this.players[userId] || !this.players[userId].disconnected) return;
         console.log(`[${this.tableId}] Reconnecting user ${this.players[userId].playerName}.`);
         this.players[userId].disconnected = false;
-        this.players[userId].socketId = newSocketId;
-        this.io.to(newSocketId).join(this.tableId);
+        this.players[userId].socketId = socket.id;
+        socket.join(this.tableId); // FIX: Use the socket object to join the room
         if (this.forfeiture.targetPlayerName === this.players[userId].playerName) {
             this._clearForfeitTimer();
             console.log(`[${this.tableId}] Cleared timeout for reconnected player ${this.players[userId].playerName}.`);
@@ -142,7 +142,14 @@ class Table {
         if (this.gameStarted) return;
         if (!this.players[requestingUserId] || this.players[requestingUserId].isSpectator) return;
         const activePlayers = Object.values(this.players).filter(p => !p.isSpectator && !p.disconnected);
-        if (activePlayers.length < 3) { return this.io.to(this.players[requestingUserId].socketId).emit("error", { message: "Need at least 3 players to start." }); }
+        if (activePlayers.length < 3) { 
+            // FIX: Emit to the specific user's socket, not the whole table.
+            const userSocket = this.io.sockets.sockets.get(this.players[requestingUserId].socketId);
+            if (userSocket) {
+                userSocket.emit("gameStartError", { message: "Need at least 3 players to start." });
+            }
+            return;
+        }
         this.playerMode = activePlayers.length;
         const activePlayerIds = activePlayers.map(p => p.userId);
         try {
@@ -175,7 +182,10 @@ class Table {
                     this.emitLobbyUpdateCallback();
                 }
             } else {
-                this.io.to(this.players[requestingUserId].socketId).emit("error", { message: err.message || "A server error occurred during buy-in." });
+                const userSocket = this.io.sockets.sockets.get(this.players[requestingUserId].socketId);
+                if (userSocket) {
+                    userSocket.emit("gameStartError", { message: err.message || "A server error occurred during buy-in." });
+                }
                 this.gameStarted = false; 
                 this.playerMode = null;
                 this.gameId = null;
@@ -489,7 +499,12 @@ class Table {
             await Promise.all(statUpdatePromises);
             const outcomeMessage = `${forfeitingPlayerName} has forfeited the game due to ${reason}.`;
             await transactionManager.updateGameRecordOutcome(this.pool, this.gameId, outcomeMessage);
-            Object.values(this.players).forEach(p => this.io.sockets.sockets.get(p.socketId)?.emit("requestUserSync"));
+            Object.values(this.players).forEach(p => {
+                const playerSocket = this.io.sockets.sockets.get(p.socketId);
+                if (playerSocket) {
+                    playerSocket.emit("requestUserSync");
+                }
+            });
             this.roundSummary = {
                 message: `${outcomeMessage} The game has ended.`, isGameOver: true,
                 gameWinner: `Payout to remaining players.`, finalScores: this.scores, payouts: tokenChanges,
@@ -611,7 +626,12 @@ class Table {
             finalOutcomeMessage = "Game Over!";
             const gameOverResult = await gameLogic.handleGameOver(this, this.pool);
             gameWinnerName = gameOverResult.gameWinnerName;
-            Object.values(this.players).forEach(p => { if (p.socketId && this.io.sockets.sockets.get(p.socketId)) { this.io.sockets.sockets.get(p.socketId).emit("requestUserSync"); } });
+            Object.values(this.players).forEach(p => { 
+                const playerSocket = this.io.sockets.sockets.get(p.socketId);
+                if (playerSocket) {
+                    playerSocket.emit("requestUserSync"); 
+                }
+            });
         }
         await this._syncPlayerTokens(Object.keys(this.players));
         this.roundSummary = { message: finalOutcomeMessage, finalScores: { ...this.scores }, isGameOver, gameWinner: gameWinnerName, dealerOfRoundId: this.dealer, widowForReveal: roundData.widowForReveal, insuranceDealWasMade: this.insurance.dealExecuted, insuranceDetails: this.insurance.dealExecuted ? this.insurance.executedDetails : null, insuranceHindsight: roundData.insuranceHindsight, allTricks: this.capturedTricks, playerTokens: this.playerTokens };
@@ -627,7 +647,12 @@ class Table {
             let dealerIndex = playerUserIds.indexOf(this.dealer);
             if (dealerIndex === -1) { this.dealer = playerUserIds[0]; dealerIndex = 0; }
             const orderedNames = [];
-            for (let i = 1; i <= playerUserIds.length; i++) { const playerId = playerUserIds[(dealerIndex + i) % playerUserIds.length]; orderedNames.push(this.players[playerId].playerName); }
+            for (let i = 1; i <= playerUserIds.length; i++) { 
+                const playerId = playerUserIds[(dealerIndex + i) % playerUserIds.length]; 
+                if (this.players[playerId]) {
+                    orderedNames.push(this.players[playerId].playerName); 
+                }
+            }
             this.playerOrderActive = orderedNames;
         } else { this.playerOrderActive = activePlayers.map(p => p.playerName).sort(); }
     }
