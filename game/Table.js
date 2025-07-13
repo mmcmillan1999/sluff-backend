@@ -331,7 +331,6 @@ class Table {
     requestDraw(userId) {
         const player = this.players[userId];
         if (!player || this.drawRequest.isActive || this.state !== 'Playing Phase') return;
-
         this.drawRequest.isActive = true;
         this.drawRequest.initiator = player.playerName;
         this.drawRequest.votes = {};
@@ -339,7 +338,6 @@ class Table {
         activePlayers.forEach(p => {
             this.drawRequest.votes[p.playerName] = (p.playerName === player.playerName) ? 'wash' : null;
         });
-
         this.drawRequest.timer = 30;
         this.internalTimers.draw = setInterval(() => {
             if (!this.drawRequest.isActive) return clearInterval(this.internalTimers.draw);
@@ -359,9 +357,7 @@ class Table {
     async submitDrawVote(userId, vote) {
         const player = this.players[userId];
         if (!player || !this.drawRequest.isActive || !['wash', 'split', 'no'].includes(vote) || this.drawRequest.votes[player.playerName] !== null) return;
-        
         this.drawRequest.votes[player.playerName] = vote;
-    
         if (vote === 'no') {
             clearInterval(this.internalTimers.draw);
             this.drawRequest.isActive = false;
@@ -369,12 +365,10 @@ class Table {
             this._emitUpdate();
             return;
         }
-    
         const allVotes = Object.values(this.drawRequest.votes);
         if (allVotes.every(v => v !== null)) {
             clearInterval(this.internalTimers.draw);
             this.drawRequest.isActive = false;
-            
             // ... (rest of the draw logic remains the same)
         } else {
             this._emitUpdate();
@@ -571,7 +565,47 @@ class Table {
         } else { this.playerOrderActive = activePlayers.map(p => p.playerName).sort(); }
     }
 
-    getStateForClient() { return { tableId: this.tableId, tableName: this.tableName, theme: this.theme, state: this.state, players: this.players, playerOrderActive: this.playerOrderActive, dealer: this.dealer, hands: this.hands, widow: this.widow, originalDealtWidow: this.originalDealtWidow, scores: this.scores, currentHighestBidDetails: this.currentHighestBidDetails, biddingTurnPlayerName: this.biddingTurnPlayerName, bidWinnerInfo: this.bidWinnerInfo, gameStarted: this.gameStarted, currentTrickCards: this.currentTrickCards, trickTurnPlayerName: this.trickTurnPlayerName, tricksPlayedCount: this.tricksPlayedCount, leadSuitCurrentTrick: this.leadSuitCurrentTrick, trumpBroken: this.trumpBroken, trickLeaderName: this.trickLeaderName, capturedTricks: this.capturedTricks, roundSummary: this.roundSummary, lastCompletedTrick: this.lastCompletedTrick, playersWhoPassedThisRound: this.playersWhoPassedThisRound, playerMode: this.playerMode, serverVersion: this.serverVersion, insurance: this.insurance, forfeiture: this.forfeiture, playerTokens: this.playerTokens, drawRequest: this.drawRequest, originalFrogBidderId: this.originalFrogBidderId, soloBidMadeAfterFrog: this.soloBidMadeAfterFrog, revealedWidowForFrog: this.revealedWidowForFrog, widowDiscardsForFrogBidder: this.widowDiscardsForFrogBidder }; }
+    getStateForClient() {
+        return {
+            tableId: this.tableId,
+            tableName: this.tableName,
+            theme: this.theme,
+            state: this.state,
+            players: this.players,
+            playerOrderActive: this.playerOrderActive,
+            dealer: this.dealer,
+            hands: this.hands,
+            widow: this.widow,
+            originalDealtWidow: this.originalDealtWidow,
+            scores: this.scores,
+            currentHighestBidDetails: this.currentHighestBidDetails,
+            biddingTurnPlayerName: this.biddingTurnPlayerName,
+            bidWinnerInfo: this.bidWinnerInfo,
+            gameStarted: this.gameStarted,
+            trumpSuit: this.trumpSuit, // FIX: Added this property
+            currentTrickCards: this.currentTrickCards,
+            trickTurnPlayerName: this.trickTurnPlayerName,
+            tricksPlayedCount: this.tricksPlayedCount,
+            leadSuitCurrentTrick: this.leadSuitCurrentTrick,
+            trumpBroken: this.trumpBroken,
+            trickLeaderName: this.trickLeaderName,
+            capturedTricks: this.capturedTricks,
+            roundSummary: this.roundSummary,
+            lastCompletedTrick: this.lastCompletedTrick,
+            playersWhoPassedThisRound: this.playersWhoPassedThisRound,
+            playerMode: this.playerMode,
+            serverVersion: this.serverVersion,
+            insurance: this.insurance,
+            forfeiture: this.forfeiture,
+            playerTokens: this.playerTokens,
+            drawRequest: this.drawRequest,
+            originalFrogBidderId: this.originalFrogBidderId,
+            soloBidMadeAfterFrog: this.soloBidMadeAfterFrog,
+            revealedWidowForFrog: this.revealedWidowForFrog,
+            widowDiscardsForFrogBidder: this.widowDiscardsForFrogBidder,
+        };
+    }
+    
     _emitUpdate() { this.io.to(this.tableId).emit('gameState', this.getStateForClient()); }
     _clearAllTimers() { for (const timer in this.internalTimers) { clearTimeout(this.internalTimers[timer]); clearInterval(this.internalTimers[timer]); } this.internalTimers = {}; }
     _initializeNewRoundState() {
