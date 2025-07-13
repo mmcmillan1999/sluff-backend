@@ -182,34 +182,97 @@ async function calculateRoundScores(table, io, pool) {
         }
     }
 
+    let roundMessage = "";
+    
     if (insurance.dealExecuted) {
         const agreement = insurance.executedDetails.agreement;
         scores[agreement.bidderPlayerName] += agreement.bidderRequirement;
         for (const defenderName in agreement.defenderOffers) {
             scores[defenderName] -= agreement.defenderOffers[defenderName];
         }
+        roundMessage = `Insurance deal executed. Points exchanged based on agreement.`;
     } else {
         const scoreDifferenceFrom60 = bidderTotalCardPoints - 60;
         const exchangeValue = Math.abs(scoreDifferenceFrom60) * currentBidMultiplier;
-        if (scoreDifferenceFrom60 > 0) {
+        if (scoreDifferenceFrom60 === 0) { roundMessage = `${bidWinnerName} scored exactly 60. No points exchanged.`; } 
+        else if (bidderTotalCardPoints > 60) {
             let totalPointsGained = 0;
             playerOrderActive.forEach(pName => { if (pName !== bidWinnerName) { scores[pName] -= exchangeValue; totalPointsGained += exchangeValue; } });
             scores[bidWinnerName] += totalPointsGained;
-        } else if (scoreDifferenceFrom60 < 0) {
+            roundMessage = `${bidWinnerName} succeeded! Gains ${totalPointsGained} points.`;
+        } else {
             let totalPointsLost = 0;
             const activeOpponents = playerOrderActive.filter(pName => pName !== bidWinnerName);
             activeOpponents.forEach(oppName => { scores[oppName] += exchangeValue; totalPointsLost += exchangeValue; });
             if (playerMode === 3) { scores[PLACEHOLDER_ID] += exchangeValue; totalPointsLost += exchangeValue; }
             else if (playerMode === 4) { const dealer = Object.values(table.players).find(p => p.userId === table.dealer); if (dealer) { scores[dealer.playerName] += exchangeValue; totalPointsLost += exchangeValue; } }
             scores[bidWinnerName] -= totalPointsLost;
+            roundMessage = `${bidWinnerName} failed. Loses ${totalPointsLost} points.`;
         }
+    }
+
+    // --- FIX: Restored Insurance Hindsight Calculation Block ---
+    let insuranceHindsight = null;
+    if (playerMode === 3) {
+        insuranceHindsight = {};
+        const defenders = playerOrderActive.filter(p => p !== bidWinnerName);
+        
+        const outcomeFromCards = {};
+        const scoreDifferenceFrom60 = bidderTotalCardPoints - 60;
+        const exchangeValue = Math.abs(scoreDifferenceFrom60) * currentBidMultiplier;
+        if (scoreDifferenceFrom60 > 0) {
+            outcomeFromCards[bidWinnerName] = exchangeValue * 2;
+            defenders.forEach(def => outcomeFromCards[def] = -exchangeValue);
+        } else if (scoreDifferenceFrom60 < 0) {
+            outcomeFromCards[bidWinnerName] = -(exchangeValue * 2);
+            defenders.forEach(def => outcomeFromCards[def] = exchangeValue);
+        } else {
+             playerOrderActive.forEach(p => outcomeFromCards[p] = 0);
+        }
+
+        const potentialOutcomeFromDeal = {};
+        const sumOfFinalOffers = Object.values(insurance.defenderOffers).reduce((sum, offer) => sum + offer, 0);
+        potentialOutcomeFromDeal[bidWinnerName] = sumOfFinalOffers;
+        const costPerDefenderForced = Math.round(insurance.bidderRequirement / defenders.length);
+        defenders.forEach(def => {
+            potentialOutcomeFromDeal[def] = -costPerDefenderForced;
+        });
+
+        const actualOutcomeFromDeal = {};
+        if (insurance.dealExecuted) {
+            const agreement = insurance.executedDetails.agreement;
+            actualOutcomeFromDeal[agreement.bidderPlayerName] = agreement.bidderRequirement;
+            for (const defName in agreement.defenderOffers) {
+                actualOutcomeFromDeal[defName] = -agreement.defenderOffers[defName];
+           }
+        }
+
+        playerOrderActive.forEach(pName => {
+            let actualPoints, potentialPoints;
+            if (insurance.dealExecuted) {
+                actualPoints = actualOutcomeFromDeal[pName];
+                potentialPoints = outcomeFromCards[pName];
+            } else {
+                actualPoints = outcomeFromCards[pName];
+                potentialPoints = potentialOutcomeFromDeal[pName];
+            }
+            
+            insuranceHindsight[pName] = {
+                actualPoints: actualPoints || 0,
+                actualReason: insurance.dealExecuted ? "Insurance Deal" : "Card Outcome",
+                potentialPoints: potentialPoints || 0,
+                potentialReason: insurance.dealExecuted ? "Played it Out" : "Taken Insurance Deal",
+                hindsightValue: (actualPoints || 0) - (potentialPoints || 0)
+            };
+        });
     }
     
     let isGameOver = Object.values(scores).filter(s => typeof s === 'number').some(score => score <= 0);
     let gameWinnerName = null;
-    let outcomeMessage = `Round Complete.`;
+    let finalOutcomeMessage = roundMessage;
     
     if (isGameOver) {
+        finalOutcomeMessage = `Game Over!`;
         try {
             const tableCost = TABLE_COSTS[theme] || 0;
             const transactionPromises = [];
@@ -221,10 +284,8 @@ async function calculateRoundScores(table, io, pool) {
 
             if (finalPlayerScores.length === 3) {
                 const [p1, p2, p3] = finalPlayerScores;
-
                 if (p1.score > p2.score && p2.score > p3.score) {
                     gameWinnerName = p1.name;
-                    outcomeMessage = `${p1.name} wins, ${p2.name} washes, ${p3.name} loses.`;
                     transactionPromises.push(transactionManager.postTransaction(pool, { userId: p1.userId, gameId, type: 'win_payout', amount: tableCost * 2, description: `Win and Payout from ${p3.name}` }));
                     statPromises.push(pool.query("UPDATE users SET wins = wins + 1 WHERE id = $1", [p1.userId]));
                     transactionPromises.push(transactionManager.postTransaction(pool, { userId: p2.userId, gameId, type: 'wash_payout', amount: tableCost, description: `Wash - Buy-in returned` }));
@@ -233,7 +294,6 @@ async function calculateRoundScores(table, io, pool) {
                 }
                 else if (p1.score === p2.score && p2.score > p3.score) {
                     gameWinnerName = `${p1.name} & ${p2.name}`;
-                    outcomeMessage = `${p1.name} & ${p2.name} tie for first, splitting ${p3.name}'s buy-in.`;
                     transactionPromises.push(transactionManager.postTransaction(pool, { userId: p1.userId, gameId, type: 'win_payout', amount: tableCost * 1.5, description: `Win (tie) - Split payout from ${p3.name}` }));
                     transactionPromises.push(transactionManager.postTransaction(pool, { userId: p2.userId, gameId, type: 'win_payout', amount: tableCost * 1.5, description: `Win (tie) - Split payout from ${p3.name}` }));
                     statPromises.push(pool.query("UPDATE users SET wins = wins + 1 WHERE id = ANY($1::int[])", [[p1.userId, p2.userId]]));
@@ -241,37 +301,23 @@ async function calculateRoundScores(table, io, pool) {
                 }
                 else if (p1.score > p2.score && p2.score === p3.score) {
                     gameWinnerName = p1.name;
-                    outcomeMessage = `${p1.name} wins. ${p2.name} & ${p3.name} tie for last.`;
                     transactionPromises.push(transactionManager.postTransaction(pool, { userId: p1.userId, gameId, type: 'win_payout', amount: tableCost * 3, description: `Win - Collects full pot` }));
                     statPromises.push(pool.query("UPDATE users SET wins = wins + 1 WHERE id = $1", [p1.userId]));
                     statPromises.push(pool.query("UPDATE users SET losses = losses + 1 WHERE id = ANY($1::int[])", [[p2.userId, p3.userId]]));
                 }
                 else {
                     gameWinnerName = "3-Way Tie";
-                    outcomeMessage = `A 3-way tie results in a wash.`;
                     finalPlayerScores.forEach(p => {
                         transactionPromises.push(transactionManager.postTransaction(pool, { userId: p.userId, gameId, type: 'wash_payout', amount: tableCost, description: `3-Way Tie - Buy-in returned` }));
                         statPromises.push(pool.query("UPDATE users SET washes = washes + 1 WHERE id = $1", [p.userId]));
                     });
-                }
-            } else {
-                const fallbackScores = Object.entries(scores).filter(([key]) => key !== PLACEHOLDER_ID).sort((a,b) => b[1] - a[1]);
-                if(fallbackScores.length > 0) gameWinnerName = fallbackScores[0][0];
-                outcomeMessage = `Game Over! Winner: ${gameWinnerName}`;
-                const winnerPlayer = Object.values(table.players).find(p => p.playerName === gameWinnerName);
-                if (winnerPlayer) {
-                    const totalPot = tableCost * playerOrderActive.length;
-                    transactionPromises.push(transactionManager.postTransaction(pool, { userId: winnerPlayer.userId, gameId: gameId, type: 'win_payout', amount: totalPot, description: `Won game ${gameId}`}));
-                    statPromises.push(pool.query("UPDATE users SET wins = wins + 1 WHERE id = $1", [winnerPlayer.userId]));
-                    const losers = Object.values(table.players).filter(p => p.playerName !== gameWinnerName && !p.isSpectator);
-                    losers.forEach(loser => statPromises.push(pool.query("UPDATE users SET losses = losses + 1 WHERE id = $1", [loser.userId])));
                 }
             }
             
             await Promise.all(transactionPromises);
             await Promise.all(statPromises);
             
-            await transactionManager.updateGameRecordOutcome(pool, gameId, `Game Over - ${outcomeMessage}`);
+            await transactionManager.updateGameRecordOutcome(pool, gameId, `Game Over! Winner: ${gameWinnerName || 'N/A'}`);
             Object.values(table.players).forEach(p => io.sockets.sockets.get(p.socketId)?.emit("requestUserSync"));
         } catch(err) {
             console.error("Database error during game over update:", err);
@@ -291,11 +337,16 @@ async function calculateRoundScores(table, io, pool) {
     }
 
     table.roundSummary = {
-        message: isGameOver ? `Game Over! ${outcomeMessage}` : outcomeMessage,
-        finalScores: { ...scores }, isGameOver, gameWinner: gameWinnerName,
-        dealerOfRoundId: table.dealer, widowForReveal, allTricks: table.capturedTricks,
+        message: finalOutcomeMessage,
+        finalScores: { ...scores }, isGameOver,
+        gameWinner: gameWinnerName, dealerOfRoundId: table.dealer, widowForReveal,
+        insuranceDealWasMade: insurance.dealExecuted, 
+        insuranceDetails: insurance.dealExecuted ? insurance.executedDetails : null,
+        insuranceHindsight: insuranceHindsight,
+        allTricks: table.capturedTricks,
         playerTokens: playerTokens
     };
+    
     table.playerTokens = playerTokens;
     table.state = isGameOver ? "Game Over" : "Awaiting Next Round Trigger";
     io.to(table.tableId).emit("gameState", table);
@@ -306,7 +357,7 @@ function prepareNextRound(table, io, helpers) {
     const { getPlayerNameByUserId, initializeNewRoundState } = helpers;
     const allPlayerIds = Object.keys(table.players).filter(pId => !table.players[pId].isSpectator && !table.players[pId].disconnected).map(pId => Number(pId));
     if (allPlayerIds.length < 3) {
-        helpers.resetTable(table.tableId);
+        helpers.resetTable(table.tableId, pool, { emitTableUpdate, emitLobbyUpdate });
         return;
     };
     const lastDealerId = table.dealer;
