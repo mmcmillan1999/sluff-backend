@@ -329,6 +329,8 @@ module.exports = {
     determineTrickWinner,
     calculateRoundScoreDetails,
     handleGameOver,
-    calculateForfeitPayout,      // Added export
-    calculateDrawSplitPayout     // Added export
+    calculateForfeitPayout,
+    calculateDrawSplitPayout,
+    // --- MODIFICATION: Export the function to make it accessible ---
+    calculateCardPoints
 };
