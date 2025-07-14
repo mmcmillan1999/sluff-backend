@@ -53,7 +53,6 @@ io.on("connection", (socket) => {
     console.log(`Socket connected: ${socket.user.username} (ID: ${socket.user.id}, Socket: ${socket.id})`);
 
     const table = Object.values(state.getAllTables()).find(t => t.players[socket.user.id]);
-    // --- FIX: Pass the entire socket object, not just the socket.id ---
     if (table && table.players[socket.user.id].disconnected) {
         table.reconnectPlayer(socket.user.id, socket);
     }
@@ -171,11 +170,23 @@ io.on("connection", (socket) => {
 
     socket.on("requestFreeToken", async () => {
         try {
+            // --- MODIFICATION: Add server-side validation for the token rule ---
+            const tokenQuery = "SELECT SUM(amount) AS current_tokens FROM transactions WHERE user_id = $1";
+            const tokenResult = await pool.query(tokenQuery, [socket.user.id]);
+            const currentTokens = parseFloat(tokenResult.rows[0]?.current_tokens || 0);
+
+            if (currentTokens >= 5) {
+                return socket.emit("error", { message: "Sorry, free tokens are only for players with fewer than 5 tokens." });
+            }
+            // --- END MODIFICATION ---
+
             await transactionManager.postTransaction(pool, {
                 userId: socket.user.id, gameId: null, type: 'free_token_mercy', amount: 1,
                 description: 'Mercy token requested by user'
             });
             socket.emit("requestUserSync");
+            socket.emit("notification", { message: "1 free token has been added to your account!" });
+
         } catch (err) {
             socket.emit("error", { message: "Could not grant token." });
         }
