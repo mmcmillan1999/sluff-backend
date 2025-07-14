@@ -153,7 +153,8 @@ class Table {
         const activePlayerIds = activePlayers.map(p => p.userId);
         try {
             this.gameId = await transactionManager.createGameRecord(this.pool, this);
-            await transactionManager.handleGameStartTransaction(this.pool, activePlayerIds, this.gameId);
+            // --- MODIFICATION: Pass the entire table instance 'this' to the transaction handler ---
+            await transactionManager.handleGameStartTransaction(this.pool, this, activePlayerIds, this.gameId);
             this.gameStarted = true;
             activePlayers.forEach(p => { if (this.scores[p.playerName] === undefined) this.scores[p.playerName] = 120; });
             if (this.playerMode === 3 && this.scores[PLACEHOLDER_ID] === undefined) { this.scores[PLACEHOLDER_ID] = 120; }
@@ -321,7 +322,6 @@ class Table {
         const parsedValue = parseInt(value, 10);
         if (isNaN(parsedValue)) return;
 
-        // Step 1: Update the relevant value in the main state object
         if (settingType === 'bidderRequirement' && player.playerName === this.insurance.bidderPlayerName) {
             const minReq = -120 * multiplier;
             const maxReq = 120 * multiplier;
@@ -335,23 +335,20 @@ class Table {
                 this.insurance.defenderOffers[player.playerName] = parsedValue;
             }
         } else {
-            return; // Exit if the update is not valid
+            return;
         }
 
-        // Step 2: Perform the check using the fresh, updated values from `this.insurance`
         const sumOfOffers = Object.values(this.insurance.defenderOffers || {}).reduce((sum, offer) => sum + (offer || 0), 0);
         if (this.insurance.bidderRequirement <= sumOfOffers) {
             this.insurance.dealExecuted = true;
             this.insurance.executedDetails = {
                 agreement: {
                     bidderPlayerName: this.insurance.bidderPlayerName,
-                    bidderRequirement: this.insurance.bidderRequirement, // Use the fresh value
-                    defenderOffers: { ...this.insurance.defenderOffers } // Use the fresh value
+                    bidderRequirement: this.insurance.bidderRequirement,
+                    defenderOffers: { ...this.insurance.defenderOffers }
                 }
             };
         }
-
-        // Step 3: Always emit an update to all clients
         this._emitUpdate();
     }
 
@@ -520,7 +517,6 @@ class Table {
         const winnerInfo = gameLogic.determineTrickWinner(this.currentTrickCards, this.leadSuitCurrentTrick, this.trumpSuit);
         this.lastCompletedTrick = { cards: [...this.currentTrickCards], winnerName: winnerInfo.playerName };
         
-        // --- MODIFICATION: Calculate trick points and update team totals ---
         const trickPoints = gameLogic.calculateCardPoints(this.lastCompletedTrick.cards.map(p => p.card));
         const winnerIsBidder = winnerInfo.playerName === this.bidWinnerInfo.playerName;
         if (winnerIsBidder) {
@@ -528,7 +524,6 @@ class Table {
         } else {
             this.defenderCardPoints += trickPoints;
         }
-        // --- END MODIFICATION ---
 
         this.tricksPlayedCount++;
         this.trickLeaderName = winnerInfo.playerName;
@@ -668,7 +663,6 @@ class Table {
     }
 
     getStateForClient() {
-        // --- MODIFICATION: Add bidderCardPoints and defenderCardPoints to the client state ---
         return {
             tableId: this.tableId, tableName: this.tableName, theme: this.theme, state: this.state, players: this.players, playerOrderActive: this.playerOrderActive, dealer: this.dealer, hands: this.hands, widow: this.widow, originalDealtWidow: this.originalDealtWidow, scores: this.scores, currentHighestBidDetails: this.currentHighestBidDetails, biddingTurnPlayerName: this.biddingTurnPlayerName, bidWinnerInfo: this.bidWinnerInfo, gameStarted: this.gameStarted, trumpSuit: this.trumpSuit, currentTrickCards: this.currentTrickCards, trickTurnPlayerName: this.trickTurnPlayerName, tricksPlayedCount: this.tricksPlayedCount, leadSuitCurrentTrick: this.leadSuitCurrentTrick, trumpBroken: this.trumpBroken, trickLeaderName: this.trickLeaderName, capturedTricks: this.capturedTricks, roundSummary: this.roundSummary, lastCompletedTrick: this.lastCompletedTrick, playersWhoPassedThisRound: this.playersWhoPassedThisRound, playerMode: this.playerMode, serverVersion: this.serverVersion, insurance: this.insurance, forfeiture: this.forfeiture, playerTokens: this.playerTokens, drawRequest: this.drawRequest, originalFrogBidderId: this.originalFrogBidderId, soloBidMadeAfterFrog: this.soloBidMadeAfterFrog, revealedWidowForFrog: this.revealedWidowForFrog, widowDiscardsForFrogBidder: this.widowDiscardsForFrogBidder,
             bidderCardPoints: this.bidderCardPoints,
@@ -683,7 +677,6 @@ class Table {
         this.hands = {}; this.widow = []; this.originalDealtWidow = []; this.biddingTurnPlayerName = null; this.currentHighestBidDetails = null; this.playersWhoPassedThisRound = []; this.bidWinnerInfo = null; this.trumpSuit = null; this.trumpBroken = false; this.originalFrogBidderId = null; this.soloBidMadeAfterFrog = false; this.revealedWidowForFrog = []; this.widowDiscardsForFrogBidder = []; this.trickTurnPlayerName = null; this.trickLeaderName = null; this.currentTrickCards = []; this.leadSuitCurrentTrick = null; this.lastCompletedTrick = null; this.tricksPlayedCount = 0; this.capturedTricks = {}; this.roundSummary = null; this.insurance = this._getInitialInsuranceState(); this.forfeiture = this._getInitialForfeitureState(); this.drawRequest = this._getInitialDrawRequestState();
         this.playerOrderActive.forEach(pName => { if (pName && this.scores[pName] !== undefined) { this.capturedTricks[pName] = []; } });
         
-        // --- MODIFICATION: Initialize running point totals for the round ---
         this.bidderCardPoints = 0;
         this.defenderCardPoints = 0;
     }

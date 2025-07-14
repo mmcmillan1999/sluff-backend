@@ -1,5 +1,8 @@
 // backend/db/transactionManager.js
 
+// --- MODIFICATION: Import TABLE_COSTS to look up buy-in amounts ---
+const { TABLE_COSTS } = require('../game/constants');
+
 const createGameRecord = async (pool, table) => {
     const query = `
         INSERT INTO game_history (table_id, theme, player_count, outcome)
@@ -18,7 +21,6 @@ const createGameRecord = async (pool, table) => {
 };
 
 const postTransaction = async (pool, { userId, gameId, type, amount, description }) => {
-    // This function remains unchanged as it was already correct.
     const query = `
         INSERT INTO transactions (user_id, game_id, transaction_type, amount, description)
         VALUES ($1, $2, $3, $4, $5)
@@ -49,17 +51,16 @@ const updateGameRecordOutcome = async (pool, gameId, outcome) => {
     }
 };
 
-const handleGameStartTransaction = async (pool, playerIds, gameId) => {
-    // FIX: This transaction now only accepts an array of player IDs and the game ID.
-    // The cost is hardcoded to -1.00 as per the game rules.
-    const cost = -1.00; 
+// --- MODIFICATION: Updated function to accept the 'table' object and use its theme ---
+const handleGameStartTransaction = async (pool, table, playerIds, gameId) => {
+    // Look up the cost dynamically based on the table's theme, default to 1 if not found
+    const cost = -(TABLE_COSTS[table.theme] || 1);
     const description = `Table buy-in for game #${gameId}`;
 
     const client = await pool.connect();
     try {
         await client.query('BEGIN');
 
-        // Step 1: Verify all players have sufficient tokens by querying the transactions table.
         const balanceQuery = `
             SELECT user_id, SUM(amount) as current_tokens 
             FROM transactions 
@@ -68,25 +69,20 @@ const handleGameStartTransaction = async (pool, playerIds, gameId) => {
         `;
         const balanceResult = await client.query(balanceQuery, [playerIds]);
         
-        // Create a map for easy lookup of player balances.
         const playerBalances = balanceResult.rows.reduce((acc, row) => {
             acc[row.user_id] = parseFloat(row.current_tokens);
             return acc;
         }, {});
 
-        // Check each player involved in the game.
         for (const userId of playerIds) {
             const balance = playerBalances[userId] || 0;
             if (balance < Math.abs(cost)) {
-                // Find the username for a more helpful error message.
                 const userRes = await client.query('SELECT username FROM users WHERE id = $1', [userId]);
                 const username = userRes.rows[0]?.username || `Player ID ${userId}`;
                 throw new Error(`${username} has insufficient tokens. Needs ${Math.abs(cost)}, but has ${balance.toFixed(2)}.`);
             }
         }
 
-        // Step 2: Log the 'buy_in' transaction for each player.
-        // There is no need to UPDATE the users table since tokens are derived.
         const transactionPromises = playerIds.map(userId => {
             const insertQuery = `
                 INSERT INTO transactions(user_id, game_id, transaction_type, amount, description) 
@@ -103,7 +99,6 @@ const handleGameStartTransaction = async (pool, playerIds, gameId) => {
     } catch (error) {
         await client.query('ROLLBACK');
         console.error("❌ Game start transaction failed and was rolled back:", error.message);
-        // Re-throw the error so the calling function in server.js can catch it.
         throw error; 
     } finally {
         client.release();
@@ -131,4 +126,4 @@ module.exports = {
     updateGameRecordOutcome,
     handleGameStartTransaction,
     awardWinnings
-};  
+};
