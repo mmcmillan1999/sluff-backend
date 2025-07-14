@@ -6,7 +6,6 @@ const transactionManager = require('../db/transactionManager');
 const { shuffle } = require('../utils/shuffle');
 
 class Table {
-    // ... constructor and other methods are unchanged ...
     constructor(tableId, theme, tableName, io, pool, emitLobbyUpdateCallback) {
         this.io = io;
         this.pool = pool;
@@ -154,6 +153,7 @@ class Table {
         const activePlayerIds = activePlayers.map(p => p.userId);
         try {
             this.gameId = await transactionManager.createGameRecord(this.pool, this);
+            // --- MODIFICATION: Pass the entire table instance 'this' to the transaction handler ---
             await transactionManager.handleGameStartTransaction(this.pool, this, activePlayerIds, this.gameId);
             this.gameStarted = true;
             activePlayers.forEach(p => { if (this.scores[p.playerName] === undefined) this.scores[p.playerName] = 120; });
@@ -288,22 +288,8 @@ class Table {
         }
     }
 
-    // --- MODIFICATION: Rename and add new "Ready Check" handler ---
-    playerReadyForNextRound(requestingUserId) {
-        if (this.state !== "Awaiting Next Round Trigger" || !this.players[requestingUserId]) {
-            return;
-        }
-        const playerName = this.players[requestingUserId].playerName;
-        if (!this.readyForNextRound.includes(playerName)) {
-            this.readyForNextRound.push(playerName);
-        }
-
-        const activePlayers = this.playerOrderActive.length;
-        if (this.readyForNextRound.length >= activePlayers) {
-            this._advanceRound();
-        } else {
-            this._emitUpdate();
-        }
+    requestNextRound(requestingUserId) {
+        if (this.state === "Awaiting Next Round Trigger" && requestingUserId === this.roundSummary?.dealerOfRoundId) { this._advanceRound(); }
     }
 
     async reset() {
@@ -653,21 +639,7 @@ class Table {
             });
         }
         await this._syncPlayerTokens(Object.keys(this.players));
-        this.roundSummary = { 
-            message: finalOutcomeMessage, 
-            finalScores: { ...this.scores }, 
-            isGameOver, 
-            gameWinner: gameWinnerName, 
-            dealerOfRoundId: this.dealer, 
-            widowForReveal: roundData.widowForReveal, 
-            insuranceDealWasMade: this.insurance.dealExecuted, 
-            insuranceDetails: this.insurance.dealExecuted ? this.insurance.executedDetails : null, 
-            insuranceHindsight: roundData.insuranceHindsight, 
-            allTricks: this.capturedTricks, 
-            playerTokens: this.playerTokens,
-            // --- MODIFICATION: Add the ready check list to the summary ---
-            readyForNextRound: this.readyForNextRound 
-        };
+        this.roundSummary = { message: finalOutcomeMessage, finalScores: { ...this.scores }, isGameOver, gameWinner: gameWinnerName, dealerOfRoundId: this.dealer, widowForReveal: roundData.widowForReveal, insuranceDealWasMade: this.insurance.dealExecuted, insuranceDetails: this.insurance.dealExecuted ? this.insurance.executedDetails : null, insuranceHindsight: roundData.insuranceHindsight, allTricks: this.capturedTricks, playerTokens: this.playerTokens };
         this.state = isGameOver ? "Game Over" : "Awaiting Next Round Trigger";
         this._emitUpdate();
     }
@@ -707,8 +679,6 @@ class Table {
         
         this.bidderCardPoints = 0;
         this.defenderCardPoints = 0;
-        // --- MODIFICATION: Add state for the ready check ---
-        this.readyForNextRound = [];
     }
 
     async _syncPlayerTokens(playerIds) {
