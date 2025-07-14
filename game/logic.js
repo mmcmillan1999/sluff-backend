@@ -39,12 +39,6 @@ function determineTrickWinner(trickCards, leadSuit, trumpSuit) {
 // PURE CALCULATION FUNCTIONS (Called by Table Class)
 // =================================================================
 
-/**
- * NEWLY RESTORED: Calculates the token distribution when a player forfeits.
- * @param {object} table - The current table instance.
- * @param {string} forfeitingPlayerName - The name of the player forfeiting.
- * @returns {object} Payout details for the remaining players.
- */
 function calculateForfeitPayout(table, forfeitingPlayerName) {
     const remainingPlayers = Object.values(table.players).filter(p => 
         !p.isSpectator && 
@@ -84,11 +78,6 @@ function calculateForfeitPayout(table, forfeitingPlayerName) {
     return payoutDetails;
 }
 
-/**
- * NEWLY RESTORED: Calculates token distribution for a "split" draw vote.
- * @param {object} table - The current table instance.
- * @returns {object} Payout details for all players.
- */
 function calculateDrawSplitPayout(table) {
     const tableBuyIn = TABLE_COSTS[table.theme] || 0;
     const playersInOrder = Object.values(table.players)
@@ -331,6 +320,5 @@ module.exports = {
     handleGameOver,
     calculateForfeitPayout,
     calculateDrawSplitPayout,
-    // --- MODIFICATION: Export the function to make it accessible ---
     calculateCardPoints
 };
