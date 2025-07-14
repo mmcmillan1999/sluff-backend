@@ -125,7 +125,7 @@ class Table {
         console.log(`[${this.tableId}] Reconnecting user ${this.players[userId].playerName}.`);
         this.players[userId].disconnected = false;
         this.players[userId].socketId = socket.id;
-        socket.join(this.tableId); // FIX: Use the socket object to join the room
+        socket.join(this.tableId);
         if (this.forfeiture.targetPlayerName === this.players[userId].playerName) {
             this._clearForfeitTimer();
             console.log(`[${this.tableId}] Cleared timeout for reconnected player ${this.players[userId].playerName}.`);
@@ -143,7 +143,6 @@ class Table {
         if (!this.players[requestingUserId] || this.players[requestingUserId].isSpectator) return;
         const activePlayers = Object.values(this.players).filter(p => !p.isSpectator && !p.disconnected);
         if (activePlayers.length < 3) { 
-            // FIX: Emit to the specific user's socket, not the whole table.
             const userSocket = this.io.sockets.sockets.get(this.players[requestingUserId].socketId);
             if (userSocket) {
                 userSocket.emit("gameStartError", { message: "Need at least 3 players to start." });
@@ -520,6 +519,17 @@ class Table {
     _resolveTrick() {
         const winnerInfo = gameLogic.determineTrickWinner(this.currentTrickCards, this.leadSuitCurrentTrick, this.trumpSuit);
         this.lastCompletedTrick = { cards: [...this.currentTrickCards], winnerName: winnerInfo.playerName };
+        
+        // --- MODIFICATION: Calculate trick points and update team totals ---
+        const trickPoints = gameLogic.calculateCardPoints(this.lastCompletedTrick.cards.map(p => p.card));
+        const winnerIsBidder = winnerInfo.playerName === this.bidWinnerInfo.playerName;
+        if (winnerIsBidder) {
+            this.bidderCardPoints += trickPoints;
+        } else {
+            this.defenderCardPoints += trickPoints;
+        }
+        // --- END MODIFICATION ---
+
         this.tricksPlayedCount++;
         this.trickLeaderName = winnerInfo.playerName;
         if (winnerInfo.playerName && !this.capturedTricks[winnerInfo.playerName]) { this.capturedTricks[winnerInfo.playerName] = []; }
@@ -658,17 +668,26 @@ class Table {
     }
 
     getStateForClient() {
+        // --- MODIFICATION: Add bidderCardPoints and defenderCardPoints to the client state ---
         return {
             tableId: this.tableId, tableName: this.tableName, theme: this.theme, state: this.state, players: this.players, playerOrderActive: this.playerOrderActive, dealer: this.dealer, hands: this.hands, widow: this.widow, originalDealtWidow: this.originalDealtWidow, scores: this.scores, currentHighestBidDetails: this.currentHighestBidDetails, biddingTurnPlayerName: this.biddingTurnPlayerName, bidWinnerInfo: this.bidWinnerInfo, gameStarted: this.gameStarted, trumpSuit: this.trumpSuit, currentTrickCards: this.currentTrickCards, trickTurnPlayerName: this.trickTurnPlayerName, tricksPlayedCount: this.tricksPlayedCount, leadSuitCurrentTrick: this.leadSuitCurrentTrick, trumpBroken: this.trumpBroken, trickLeaderName: this.trickLeaderName, capturedTricks: this.capturedTricks, roundSummary: this.roundSummary, lastCompletedTrick: this.lastCompletedTrick, playersWhoPassedThisRound: this.playersWhoPassedThisRound, playerMode: this.playerMode, serverVersion: this.serverVersion, insurance: this.insurance, forfeiture: this.forfeiture, playerTokens: this.playerTokens, drawRequest: this.drawRequest, originalFrogBidderId: this.originalFrogBidderId, soloBidMadeAfterFrog: this.soloBidMadeAfterFrog, revealedWidowForFrog: this.revealedWidowForFrog, widowDiscardsForFrogBidder: this.widowDiscardsForFrogBidder,
+            bidderCardPoints: this.bidderCardPoints,
+            defenderCardPoints: this.defenderCardPoints,
         };
     }
     
     _emitUpdate() { this.io.to(this.tableId).emit('gameState', this.getStateForClient()); }
     _clearAllTimers() { for (const timer in this.internalTimers) { clearTimeout(this.internalTimers[timer]); clearInterval(this.internalTimers[timer]); } this.internalTimers = {}; }
+    
     _initializeNewRoundState() {
         this.hands = {}; this.widow = []; this.originalDealtWidow = []; this.biddingTurnPlayerName = null; this.currentHighestBidDetails = null; this.playersWhoPassedThisRound = []; this.bidWinnerInfo = null; this.trumpSuit = null; this.trumpBroken = false; this.originalFrogBidderId = null; this.soloBidMadeAfterFrog = false; this.revealedWidowForFrog = []; this.widowDiscardsForFrogBidder = []; this.trickTurnPlayerName = null; this.trickLeaderName = null; this.currentTrickCards = []; this.leadSuitCurrentTrick = null; this.lastCompletedTrick = null; this.tricksPlayedCount = 0; this.capturedTricks = {}; this.roundSummary = null; this.insurance = this._getInitialInsuranceState(); this.forfeiture = this._getInitialForfeitureState(); this.drawRequest = this._getInitialDrawRequestState();
         this.playerOrderActive.forEach(pName => { if (pName && this.scores[pName] !== undefined) { this.capturedTricks[pName] = []; } });
+        
+        // --- MODIFICATION: Initialize running point totals for the round ---
+        this.bidderCardPoints = 0;
+        this.defenderCardPoints = 0;
     }
+
     async _syncPlayerTokens(playerIds) {
         if (!playerIds || playerIds.length === 0) { this.playerTokens = {}; return; }
         try {

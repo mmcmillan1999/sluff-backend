@@ -9,8 +9,9 @@ const BID_HIERARCHY = ["Pass", "Frog", "Solo", "Heart Solo"];
 const BID_MULTIPLIERS = { "Frog": 1, "Solo": 2, "Heart Solo": 3 };
 const PLACEHOLDER_ID = "ScoreAbsorber";
 
-// --- NEW: Define table costs ---
+// --- MODIFICATION: Define table costs, including the new learner table ---
 const TABLE_COSTS = {
+    'miss-pauls-academy': 0.1,
     'fort-creek': 1,
     'shirecliff-road': 5,
     'dans-deck': 20,

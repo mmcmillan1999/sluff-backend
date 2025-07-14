@@ -5,7 +5,9 @@ const { SERVER_VERSION, TABLE_COSTS } = require('./constants');
 
 let tables = {};
 
+// --- MODIFICATION: Added "Miss Paul's Academy" as a theme ---
 const THEMES = [
+    { id: 'miss-pauls-academy', name: "Miss Paul's Academy", count: 10 },
     { id: 'fort-creek', name: 'Fort Creek', count: 10 },
     { id: 'shirecliff-road', name: 'ShireCliff Road', count: 10 },
     { id: 'dans-deck', name: "Dan's Deck", count: 10 },
