@@ -12,7 +12,8 @@ const state = require('./game/gameState');
 const createAuthRoutes = require('./routes/auth');
 const createLeaderboardRoutes = require('./routes/leaderboard');
 const createAdminRoutes = require('./routes/admin');
-const createFeedbackRoutes = require('./routes/feedback'); // 1. REQUIRE THE NEW ROUTE
+const createFeedbackRoutes = require('./routes/feedback');
+const createChatRoutes = require('./routes/chat'); // 1. REQUIRE THE NEW CHAT ROUTE
 const createDbTables = require('./db/createTables');
 const transactionManager = require("./db/transactionManager"); // Required for free token
 
@@ -170,7 +171,6 @@ io.on("connection", (socket) => {
 
     socket.on("requestFreeToken", async () => {
         try {
-            // --- MODIFICATION: Add server-side validation for the token rule ---
             const tokenQuery = "SELECT SUM(amount) AS current_tokens FROM transactions WHERE user_id = $1";
             const tokenResult = await pool.query(tokenQuery, [socket.user.id]);
             const currentTokens = parseFloat(tokenResult.rows[0]?.current_tokens || 0);
@@ -178,7 +178,6 @@ io.on("connection", (socket) => {
             if (currentTokens >= 5) {
                 return socket.emit("error", { message: "Sorry, free tokens are only for players with fewer than 5 tokens." });
             }
-            // --- END MODIFICATION ---
 
             await transactionManager.postTransaction(pool, {
                 userId: socket.user.id, gameId: null, type: 'free_token_mercy', amount: 1,
@@ -226,8 +225,12 @@ server.listen(PORT, async () => {
     const adminRouter = createAdminRoutes(pool, jwt);
     app.use('/api/admin', adminRouter);
 
-    const feedbackRouter = createFeedbackRoutes(pool, jwt); // 2. CREATE THE ROUTER...
-    app.use('/api/feedback', feedbackRouter);              // ...AND USE IT
+    const feedbackRouter = createFeedbackRoutes(pool, jwt);
+    app.use('/api/feedback', feedbackRouter);
+
+    // 2. CREATE THE CHAT ROUTER...
+    const chatRouter = createChatRoutes(pool, io, jwt);
+    app.use('/api/chat', chatRouter); // ...AND USE IT
 
     state.initializeGameTables(io, pool);
 

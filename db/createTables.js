@@ -1,4 +1,4 @@
-// backend/db/createTables.js
+/ backend/db/createTables.js
 
 const createDbTables = async (pool) => {
     try {
@@ -74,7 +74,6 @@ const createDbTables = async (pool) => {
             );
         `);
 
-        // NEW: Create the feedback table
         await pool.query(`
             CREATE TABLE IF NOT EXISTS feedback (
                 feedback_id SERIAL PRIMARY KEY,
@@ -87,6 +86,18 @@ const createDbTables = async (pool) => {
                 status feedback_status_enum DEFAULT 'new'
             );
         `);
+
+        // --- NEW: Create the lobby chat messages table ---
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS lobby_chat_messages (
+                id SERIAL PRIMARY KEY,
+                user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                username VARCHAR(50),
+                message TEXT NOT NULL,
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+            );
+        `);
+
 
         console.log("✅ Tables checked/created successfully.");
     } catch (err) {
