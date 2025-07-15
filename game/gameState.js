@@ -5,7 +5,6 @@ const { SERVER_VERSION, TABLE_COSTS } = require('./constants');
 
 let tables = {};
 
-// --- MODIFICATION: Added "Miss Paul's Academy" as a theme ---
 const THEMES = [
     { id: 'miss-pauls-academy', name: "Miss Paul's Academy", count: 10 },
     { id: 'fort-creek', name: 'Fort Creek', count: 10 },
@@ -15,7 +14,6 @@ const THEMES = [
 
 /**
  * Creates instances of the Table class for each defined theme.
- * This is the factory that builds our game world.
  * @param {object} io - The main socket.io server instance.
  * @param {object} pool - The PostgreSQL connection pool.
  */
@@ -32,7 +30,6 @@ function initializeGameTables(io, pool) {
             const tableNumber = i + 1;
             const tableName = `${theme.name} #${tableNumber}`;
             
-            // Create a new instance of our Table class
             tables[tableId] = new Table(tableId, theme.id, tableName, io, pool, emitLobbyUpdate);
             tableCounter++;
         }
@@ -50,21 +47,21 @@ function getAllTables() {
 
 /**
  * Gathers the state of all tables for the main lobby view.
- * It calls the getStateForClient method on each table instance.
  */
 function getLobbyState() {
     const groupedByTheme = THEMES.map(theme => {
         const themeTables = Object.values(tables)
             .filter(tableInstance => tableInstance.theme === theme.id)
             .map(tableInstance => {
-                const clientState = tableInstance.getStateForClient(); // Get the serializable state
+                const clientState = tableInstance.getStateForClient();
                 const activePlayers = Object.values(clientState.players).filter(p => !p.isSpectator);
                 return {
                     tableId: clientState.tableId,
                     tableName: clientState.tableName,
                     state: clientState.state,
                     playerCount: activePlayers.length,
-                    playerNames: activePlayers.map(p => p.playerName)
+                    // --- MODIFICATION: Send player objects with IDs and names ---
+                    players: activePlayers.map(p => ({ userId: p.userId, playerName: p.playerName }))
                 };
             });
         return { ...theme, cost: TABLE_COSTS[theme.id] || 0, tables: themeTables };

@@ -2,7 +2,7 @@
 require("dotenv").config();
 const http = require("http");
 const express = require("express");
-const cors = require("cors");
+const cors =require("cors");
 const { Server } = require("socket.io");
 const { Pool } = require("pg");
 const jwt = require("jsonwebtoken");
@@ -12,10 +12,10 @@ const state = require('./game/gameState');
 const createAuthRoutes = require('./routes/auth');
 const createLeaderboardRoutes = require('./routes/leaderboard');
 const createAdminRoutes = require('./routes/admin');
-const createFeedbackRoutes = require('./routes/feedback');
-const createChatRoutes = require('./routes/chat'); // 1. REQUIRE THE NEW CHAT ROUTE
+const createFeedbackRoutes = require('./routes/feedback'); 
+const createChatRoutes = require('./routes/chat');
 const createDbTables = require('./db/createTables');
-const transactionManager = require("./db/transactionManager"); // Required for free token
+const transactionManager = require("./db/transactionManager");
 
 const app = express();
 const server = http.createServer(app);
@@ -183,7 +183,20 @@ io.on("connection", (socket) => {
                 userId: socket.user.id, gameId: null, type: 'free_token_mercy', amount: 1,
                 description: 'Mercy token requested by user'
             });
-            socket.emit("requestUserSync");
+            
+            // --- MODIFICATION: Fetch the user's new profile and push it to the client ---
+            const userQuery = "SELECT id, username, email, created_at, wins, losses, washes, is_admin FROM users WHERE id = $1";
+            const userResult = await pool.query(userQuery, [socket.user.id]);
+            const updatedUser = userResult.rows[0];
+
+            if (updatedUser) {
+                const updatedTokenQuery = "SELECT SUM(amount) AS current_tokens FROM transactions WHERE user_id = $1";
+                const updatedTokenResult = await pool.query(updatedTokenQuery, [socket.user.id]);
+                updatedUser.tokens = parseFloat(updatedTokenResult.rows[0]?.current_tokens || 0).toFixed(2);
+                socket.emit("updateUser", updatedUser); // This sends the complete, fresh user object
+            }
+            // --- END MODIFICATION ---
+
             socket.emit("notification", { message: "1 free token has been added to your account!" });
 
         } catch (err) {
@@ -225,12 +238,11 @@ server.listen(PORT, async () => {
     const adminRouter = createAdminRoutes(pool, jwt);
     app.use('/api/admin', adminRouter);
 
-    const feedbackRouter = createFeedbackRoutes(pool, jwt);
-    app.use('/api/feedback', feedbackRouter);
+    const feedbackRouter = createFeedbackRoutes(pool, jwt); 
+    app.use('/api/feedback', feedbackRouter);              
 
-    // 2. CREATE THE CHAT ROUTER...
     const chatRouter = createChatRoutes(pool, io, jwt);
-    app.use('/api/chat', chatRouter); // ...AND USE IT
+    app.use('/api/chat', chatRouter);
 
     state.initializeGameTables(io, pool);
 
