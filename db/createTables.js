@@ -1,4 +1,4 @@
-/ backend/db/createTables.js
+// backend/db/createTables.js
 
 const createDbTables = async (pool) => {
     try {
