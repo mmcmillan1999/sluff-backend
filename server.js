@@ -223,7 +223,7 @@ server.listen(PORT, async () => {
     const leaderboardRoutes = createLeaderboardRoutes(pool);
     app.use('/api/leaderboard', leaderboardRoutes);
 
-    const adminRouter = createAdminRoutes(pool);
+    const adminRouter = createAdminRoutes(pool, jwt);
     app.use('/api/admin', adminRouter);
 
     const feedbackRouter = createFeedbackRoutes(pool, jwt); // 2. CREATE THE ROUTER...

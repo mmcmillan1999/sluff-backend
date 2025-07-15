@@ -5,9 +5,23 @@ const fs = require('fs');
 const path = require('path');
 
 // This function creates the router and gives it the database pool
-const createAdminRoutes = (pool) => {
+const createAdminRoutes = (pool, jwt) => {
   const router = express.Router();
-
+ 
+  const checkAuth = (req, res, next) => {
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return res.status(401).send('Authentication required.');
+    }
+    const token = authHeader.split(' ')[1];
+    jwt.verify(token, process.env.JWT_SECRET, (err, user) => {
+      if (err) {
+        return res.status(403).send('Invalid or expired token.');
+      }
+      req.user = user;
+      next();
+    });
+  };
   // A middleware to check if the user is an admin
   const isAdmin = async (req, res, next) => {
     // This assumes you have a way to get the user's ID from the request,
@@ -29,7 +43,7 @@ const createAdminRoutes = (pool) => {
     }
   };
 
-  router.post('/generate-schema', isAdmin, async (req, res) => {
+ router.post('/generate-schema', checkAuth, isAdmin, async (req, res) => {
     try {
       const sqlQuery = `
         SELECT table_name, column_name, data_type

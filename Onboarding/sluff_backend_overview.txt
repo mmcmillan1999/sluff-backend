@@ -1,0 +1,58 @@
+Overview
+--------
+The repository is a Node.js backend for the “Sluff” card game. Its dependencies
+include Express, Socket.IO, PostgreSQL (via `pg`), JSON Web Tokens, and other
+packages listed in `package.json`.
+
+Entry Point
+-----------
+`server.js` is the main entry point. It loads environment variables, configures
+Express and Socket.IO, establishes a database connection, sets up authentication
+middleware, and mounts the API routes (auth, leaderboard, admin, and feedback).
+Game tables are initialized after the database is ready.
+
+Game Logic
+----------
+All in-memory game state is located in the `game` directory:
+- `constants.js` holds card constants, bidding rules, and table costs.
+- `gameState.js` manages the collection of tables and provides lobby state information.
+- `Table.js` is the core state machine. It tracks players, handles bidding and card
+  plays, manages draws and forfeits, and emits updates via Socket.IO.
+- `logic.js` contains pure functions for trick resolution, score calculations,
+  and payout logic when games end.
+
+Database Layer
+--------------
+`db/createTables.js` defines database tables for users, game history, transactions,
+and feedback. It also creates custom enumerations for transaction types and
+feedback status. `db/transactionManager.js` contains helper functions to record
+buy-ins, payouts, and game summaries.
+
+Express Routes
+--------------
+- `routes/auth.js` manages user registration and login, returning JWTs.
+- `routes/leaderboard.js` aggregates user stats and token balances.
+- `routes/admin.js` and the similar `adminroutes.js` provide administrative
+  features like generating a Markdown schema of the database.
+- `routes/feedback.js` lets authenticated users submit feedback.
+
+Developer Onboarding
+--------------------
+The `Onboarding` folder contains several text prompts and a project roadmap.
+Prompt 4 explains the workflow, recommended tools (VS Code, GitHub, Netlify,
+Render, DBeaver), and collaboration guidelines such as asking questions whenever
+uncertain and providing full file modifications rather than snippets. The roadmap
+lists completed and upcoming features across development phases.
+
+Next Steps to Learn
+-------------------
+1. Study `Table.js` and `logic.js` to understand bidding, trick-taking,
+   and scoring.
+2. Explore `db/transactionManager.js` and the route handlers to learn how
+   tokens and player statistics are stored.
+3. Review the onboarding prompts for project goals and collaboration practices.
+4. Check environment variables in `.env` (not included in the repo) for running
+   the project locally.
+
+This overview should help new contributors understand the layout and main
+components of the Sluff backend.
