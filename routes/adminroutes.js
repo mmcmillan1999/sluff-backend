@@ -41,7 +41,7 @@ router.post('/generate-schema', isAdmin, async (req, res) => {
 
     // 3. Write the content to the file
     // This places the file in the root of your project
-    const filePath = path.join(__dirname, '../../DATABASE_SCHEMA.md');
+    const filePath = path.join(__dirname, '../DATABASE_SCHEMA.md');
     fs.writeFileSync(filePath, markdownContent);
 
     res.status(200).send('DATABASE_SCHEMA.md has been updated successfully.');

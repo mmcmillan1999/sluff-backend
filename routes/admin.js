@@ -63,7 +63,7 @@ const createAdminRoutes = (pool, jwt) => {
       });
 
       // Writes the file to the project's root directory
-      const filePath = path.join(__dirname, '../../DATABASE_SCHEMA.md');
+      const filePath = path.join(__dirname, '../DATABASE_SCHEMA.md'); 
       fs.writeFileSync(filePath, markdownContent);
 
       res.status(200).send('DATABASE_SCHEMA.md updated successfully.');
