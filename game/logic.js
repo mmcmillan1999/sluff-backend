@@ -140,11 +140,7 @@ function calculateRoundScoreDetails(table) {
         bidderTotalCardPoints += widowPoints;
     } else if (bidType === "Solo" || bidType === "Heart Solo") {
         widowPoints = calculateCardPoints(originalDealtWidow);
-        if (bidType === "Heart Solo" && table.trickLeaderName !== bidWinnerName) {
-             bidderTotalCardPoints += widowPoints;
-        } else {
-            bidderTotalCardPoints += widowPoints;
-        }
+        bidderTotalCardPoints += widowPoints;
     }
 
     let roundMessage = "";
@@ -199,13 +195,22 @@ function calculateRoundScoreDetails(table) {
     
     const insuranceHindsight = calculateInsuranceHindsight(table, bidderTotalCardPoints, currentBidMultiplier);
 
+    // --- MODIFICATION: Return the final, fully calculated points ---
+    const finalBidderPoints = bidderTotalCardPoints;
+    const finalDefenderPoints = 120 - finalBidderPoints;
+
     return {
         pointChanges,
         roundMessage,
         widowForReveal,
-        insuranceHindsight
+        insuranceHindsight,
+        finalBidderPoints,
+        finalDefenderPoints,
+        widowPointsValue: widowPoints,
+        bidType
     };
 }
+
 
 async function handleGameOver(table, pool) {
     let gameWinnerName = "N/A";
