@@ -5,11 +5,12 @@ const { SERVER_VERSION, TABLE_COSTS } = require('./constants');
 
 let tables = {};
 
+// --- MODIFICATION: Reordered the themes to place Miss Paul's Academy last ---
 const THEMES = [
-    { id: 'miss-pauls-academy', name: "Miss Paul's Academy", count: 10 },
     { id: 'fort-creek', name: 'Fort Creek', count: 10 },
     { id: 'shirecliff-road', name: 'ShireCliff Road', count: 10 },
     { id: 'dans-deck', name: "Dan's Deck", count: 10 },
+    { id: 'miss-pauls-academy', name: "Miss Paul's Academy", count: 10 },
 ];
 
 /**
@@ -60,7 +61,6 @@ function getLobbyState() {
                     tableName: clientState.tableName,
                     state: clientState.state,
                     playerCount: activePlayers.length,
-                    // --- MODIFICATION: Send player objects with IDs and names ---
                     players: activePlayers.map(p => ({ userId: p.userId, playerName: p.playerName }))
                 };
             });
