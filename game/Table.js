@@ -791,25 +791,25 @@ class Table {
 
         // Case: Bot's turn to bid.
         if (this.state === 'Bidding Phase' && this.biddingTurnPlayerId === activeBot.userId) {
-            this.pendingBotAction = setTimeout(() => { this.pendingBotAction = null; activeBot.makeBid(); }, 500);
+            this.pendingBotAction = setTimeout(() => { this.pendingBotAction = null; activeBot.makeBid(); }, 1000);
             return;
         }
 
         // Case: Bot won the bid and must choose trump.
         if (this.state === 'Trump Selection' && this.bidWinnerInfo?.userId === activeBot.userId && !this.trumpSuit) {
-            this.pendingBotAction = setTimeout(() => { this.pendingBotAction = null; activeBot.chooseTrump(); }, 500);
+            this.pendingBotAction = setTimeout(() => { this.pendingBotAction = null; activeBot.chooseTrump(); }, 1000);
             return;
         }
 
         // Case: Bot won with Frog and must discard from the widow.
         if (this.state === 'Frog Widow Exchange' && this.bidWinnerInfo?.userId === activeBot.userId && this.widowDiscardsForFrogBidder.length === 0) {
-            this.pendingBotAction = setTimeout(() => { this.pendingBotAction = null; activeBot.submitFrogDiscards(); }, 500);
+            this.pendingBotAction = setTimeout(() => { this.pendingBotAction = null; activeBot.submitFrogDiscards(); }, 1000);
             return;
         }
 
         // Case: Bot's turn to play a card.
         if (this.state === 'Playing Phase' && this.trickTurnPlayerId === activeBot.userId) {
-            this.pendingBotAction = setTimeout(() => { this.pendingBotAction = null; activeBot.playCard(); }, 500);
+            this.pendingBotAction = setTimeout(() => { this.pendingBotAction = null; activeBot.playCard(); }, 1200);
             return;
         }
     }
