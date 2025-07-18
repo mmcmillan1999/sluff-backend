@@ -6,7 +6,7 @@ const BotPlayer = require('./BotPlayer');
 const transactionManager = require('../db/transactionManager');
 const { shuffle } = require('../utils/shuffle');
 
-// --- MODIFIED --- Expanded the list of predefined bot names.
+// --- NEW --- Predefined names for the bots.
 const BOT_NAMES = ["Mike Knight", "Grandma Joe", "Grampa Blane", "Kimba", "Courtney Sr.", "Cliff"];
 
 class Table {
@@ -327,13 +327,26 @@ class Table {
         
         const isLeading = this.currentTrickCards.length === 0;
         const playedSuit = gameLogic.getSuit(card);
+        // --- MODIFICATION: Added logging and error emissions for all rule checks ---
         if (isLeading) {
-            if (playedSuit === this.trumpSuit && !this.trumpBroken && !hand.every(c => gameLogic.getSuit(c) === this.trumpSuit)) { return this.io.to(player.socketId).emit("error", { message: "Cannot lead trump until it is broken." }); }
+            if (playedSuit === this.trumpSuit && !this.trumpBroken && !hand.every(c => gameLogic.getSuit(c) === this.trumpSuit)) {
+                const msg = "Cannot lead trump until it is broken.";
+                console.error(`[${this.tableId}] ILLEGAL MOVE by ${player.playerName}: ${msg}`);
+                return this.io.to(player.socketId).emit("error", { message: msg });
+            }
         } else {
             const leadCardSuit = this.leadSuitCurrentTrick;
             const hasLeadSuit = hand.some(c => gameLogic.getSuit(c) === leadCardSuit);
-            if (hasLeadSuit && playedSuit !== leadCardSuit) { return this.io.to(player.socketId).emit("error", { message: `Must follow suit (${SUITS[leadCardSuit]}).` }); }
-            if (!hasLeadSuit && hand.some(c => gameLogic.getSuit(c) === this.trumpSuit) && playedSuit !== this.trumpSuit) { return this.io.to(player.socketId).emit("error", { message: "You must play trump if you cannot follow suit." }); }
+            if (hasLeadSuit && playedSuit !== leadCardSuit) {
+                const msg = `Must follow suit (${SUITS[leadCardSuit]}).`;
+                console.error(`[${this.tableId}] ILLEGAL MOVE by ${player.playerName}: ${msg}`);
+                return this.io.to(player.socketId).emit("error", { message: msg });
+            }
+            if (!hasLeadSuit && hand.some(c => gameLogic.getSuit(c) === this.trumpSuit) && playedSuit !== this.trumpSuit) {
+                const msg = "You must play trump if you cannot follow suit.";
+                console.error(`[${this.tableId}] ILLEGAL MOVE by ${player.playerName}: ${msg}`);
+                return this.io.to(player.socketId).emit("error", { message: msg });
+            }
         }
         this.hands[player.playerName] = hand.filter(c => c !== card);
         this.currentTrickCards.push({ userId, playerName: player.playerName, card });
@@ -762,8 +775,7 @@ class Table {
 
         for (const botId in this.bots) {
             const bot = this.bots[botId];
-
-            // --- MODIFIED --- Add a special, longer delay for Courtney Sr.
+            
             const isCourtney = bot.playerName === "Courtney Sr.";
             const standardDelay = 1000;
             const playDelay = 1200;
