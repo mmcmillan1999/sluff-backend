@@ -6,7 +6,7 @@ const BotPlayer = require('./BotPlayer');
 const transactionManager = require('../db/transactionManager');
 const { shuffle } = require('../utils/shuffle');
 
-// --- MODIFIED --- Expanded the list of predefined bot names with the new list.
+// --- MODIFIED --- Expanded the list of predefined bot names.
 const BOT_NAMES = [
     "Michael Jr.", "George Charles Watts Sr.", "Verl Fayette Sr.", "George",
     "Courtney", "Verl Fayette Jr.", "Bob Lynn", "Wendell Taylor",
@@ -731,7 +731,24 @@ class Table {
             });
         }
         await this._syncPlayerTokens(Object.keys(this.players));
-        this.roundSummary = { message: finalOutcomeMessage, finalScores: { ...this.scores }, isGameOver, gameWinner: gameWinnerName, dealerOfRoundId: this.dealer, widowForReveal: roundData.widowForReveal, insuranceDealWasMade: this.insurance.dealExecuted, insuranceDetails: this.insurance.dealExecuted ? this.insurance.executedDetails : null, insuranceHindsight: roundData.insuranceHindsight, allTricks: this.capturedTricks, playerTokens: this.playerTokens };
+        
+        // --- MODIFICATION: Add bidWinnerInfo and playerOrderActive to the summary object ---
+        const playerOrderActiveNames = this.playerOrderActive.map(id => this.players[id]?.playerName).filter(Boolean);
+        this.roundSummary = { 
+            ...roundData, // Includes points, message, etc.
+            finalScores: { ...this.scores }, 
+            isGameOver, 
+            gameWinner: gameWinnerName, 
+            dealerOfRoundId: this.dealer, 
+            widowForReveal: roundData.widowForReveal, 
+            insuranceDealWasMade: this.insurance.dealExecuted, 
+            insuranceDetails: this.insurance.dealExecuted ? this.insurance.executedDetails : null, 
+            insuranceHindsight: roundData.insuranceHindsight, 
+            allTricks: this.capturedTricks, 
+            playerTokens: this.playerTokens,
+            bidWinnerInfo: { ...this.bidWinnerInfo }, // Snapshot of the winner info
+            playerOrderActive: playerOrderActiveNames, // Snapshot of the player order (names)
+        };
         this.state = isGameOver ? "Game Over" : "Awaiting Next Round Trigger";
         this._emitUpdate();
     }
