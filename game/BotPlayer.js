@@ -1,6 +1,6 @@
 const gameLogic = require('./logic');
-const { RANKS_ORDER } = require('./constants');
-const { getLegalMoves } = require('./legalMoves'); // --- MODIFIED: Import the new logic ---
+const { RANKS_ORDER, BID_HIERARCHY } = require('./constants');
+const { getLegalMoves } = require('./legalMoves');
 
 // Helper function to get the rank value of a card for sorting.
 const getRankValue = (card) => RANKS_ORDER.indexOf(gameLogic.getRank(card));
@@ -12,14 +12,70 @@ class BotPlayer {
         this.table = table;
     }
 
+    /**
+     * Analyzes a hand to determine its point value and suit distribution.
+     * @param {string[]} hand - The array of card strings in the hand.
+     * @returns {{points: number, suits: {H: number, S: number, C: number, D: number}}}
+     */
+    _analyzeHand(hand) {
+        if (!hand || hand.length === 0) {
+            return { points: 0, suits: { H: 0, S: 0, C: 0, D: 0 } };
+        }
+        const points = gameLogic.calculateCardPoints(hand);
+        const suits = { H: 0, S: 0, C: 0, D: 0 };
+        for (const card of hand) {
+            suits[gameLogic.getSuit(card)]++;
+        }
+        return { points, suits };
+    }
+
     makeBid() {
-        // Simple strategy: always pass
-        this.table.placeBid(this.userId, 'Pass');
+        const hand = this.table.hands[this.playerName] || [];
+        const handStats = this._analyzeHand(hand);
+        const { points, suits } = handStats;
+
+        let potentialBid = "Pass";
+
+        // Evaluate for Heart Solo (highest bid)
+        if ((points > 30 && suits.H >= 5) || (points > 40 && suits.H >= 4)) {
+            potentialBid = "Heart Solo";
+        }
+        // Evaluate for other Solos
+        else if ((points > 30 && (suits.S >= 5 || suits.C >= 5 || suits.D >= 5)) ||
+                 (points > 40 && (suits.S >= 4 || suits.C >= 4 || suits.D >= 4))) {
+            potentialBid = "Solo";
+        }
+        // Evaluate for Frog
+        else if ((points > 30 && suits.H >= 4) || (points > 40 && suits.H >= 3)) {
+            potentialBid = "Frog";
+        }
+
+        // Check if the potential bid is higher than the current bid on the table
+        const currentBidDetails = this.table.currentHighestBidDetails;
+        const currentBidLevel = currentBidDetails ? BID_HIERARCHY.indexOf(currentBidDetails.bid) : -1;
+        const potentialBidLevel = BID_HIERARCHY.indexOf(potentialBid);
+
+        if (potentialBidLevel > currentBidLevel) {
+            this.table.placeBid(this.userId, potentialBid);
+        } else {
+            this.table.placeBid(this.userId, "Pass");
+        }
     }
 
     chooseTrump() {
-        // Default to Clubs
-        this.table.chooseTrump(this.userId, 'C');
+        const hand = this.table.hands[this.playerName] || [];
+        const handStats = this._analyzeHand(hand);
+        
+        // Find the strongest suit (non-Heart) to be trump
+        let bestSuit = 'C';
+        let maxCount = 0;
+        for (const suit of ['S', 'C', 'D']) {
+            if (handStats.suits[suit] > maxCount) {
+                maxCount = handStats.suits[suit];
+                bestSuit = suit;
+            }
+        }
+        this.table.chooseTrump(this.userId, bestSuit);
     }
 
     submitFrogDiscards() {
@@ -34,8 +90,6 @@ class BotPlayer {
         const hand = this.table.hands[this.playerName];
         if (!hand || hand.length === 0) return;
 
-        // --- MODIFICATION: The entire card selection logic is now refactored ---
-
         // 1. Get all legal moves first. This prevents the bot from ever getting stuck.
         const isLeading = this.table.currentTrickCards.length === 0;
         const legalPlays = getLegalMoves(
@@ -46,7 +100,6 @@ class BotPlayer {
             this.table.trumpBroken
         );
 
-        // If for some reason there are no legal plays, exit to prevent a crash.
         if (legalPlays.length === 0) {
             console.error(`[${this.table.tableId}] Bot ${this.playerName} has no legal moves from hand: ${hand.join(', ')}`);
             return;

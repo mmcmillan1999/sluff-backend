@@ -6,8 +6,8 @@ const BotPlayer = require('./BotPlayer');
 const transactionManager = require('../db/transactionManager');
 const { shuffle } = require('../utils/shuffle');
 
-// --- NEW --- Predefined names for the bots.
-const BOT_NAMES = ["Mike Knight", "Grandma Joe", "Grampa Blane"];
+// --- MODIFIED --- Expanded the list of predefined bot names.
+const BOT_NAMES = ["Mike Knight", "Grandma Joe", "Grampa Blane", "Kimba", "Courtney Sr.", "Cliff"];
 
 class Table {
     constructor(tableId, theme, tableName, io, pool, emitLobbyUpdateCallback) {
@@ -101,25 +101,19 @@ class Table {
     }
 
     addBotPlayer() {
+        // --- MODIFIED --- Complete overhaul of bot naming and selection logic.
         const currentPlayers = Object.values(this.players).filter(p => !p.isSpectator);
-        if (currentPlayers.length >= 4) return;
+        if (currentPlayers.length >= 4) return; // Table is full
 
-        const currentNames = new Set(currentPlayers.map(p => p.playerName));
-        let botName = "Bot";
-        for (const name of BOT_NAMES) {
-            if (!currentNames.has(name)) {
-                botName = name;
-                break;
-            }
+        const currentBotNames = new Set(currentPlayers.filter(p => p.isBot).map(p => p.playerName));
+        const availableNames = BOT_NAMES.filter(name => !currentBotNames.has(name));
+
+        if (availableNames.length === 0) {
+            console.log(`[${this.tableId}] No available bot names to add.`);
+            return; // No more unique named bots to add
         }
-        // Fallback if all predefined names are taken
-        if (currentNames.has(botName)) {
-            let i = 1;
-            while (currentNames.has(`Bot #${i}`)) {
-                i++;
-            }
-            botName = `Bot #${i}`;
-        }
+
+        const botName = availableNames[Math.floor(Math.random() * availableNames.length)];
         
         const botId = this._nextBotId--;
         this.players[botId] = {
@@ -769,40 +763,51 @@ class Table {
         for (const botId in this.bots) {
             const bot = this.bots[botId];
 
+            // --- MODIFIED --- Add a special, longer delay for Courtney Sr.
+            const isCourtney = bot.playerName === "Courtney Sr.";
+            const standardDelay = 1000;
+            const playDelay = 1200;
+            const roundEndDelay = 8000;
+
             if (this.state === 'Dealing Pending' && this.dealer === bot.userId) {
+                let delay = isCourtney ? standardDelay * 2 : standardDelay;
                 this.pendingBotAction = setTimeout(() => {
                     this.pendingBotAction = null;
                     this.dealCards(bot.userId);
-                }, 1000);
+                }, delay);
                 return;
             }
 
             if (this.state === 'Awaiting Next Round Trigger' && this.roundSummary?.dealerOfRoundId === bot.userId) {
-                // --- MODIFICATION: Increased delay to 8 seconds ---
+                let delay = isCourtney ? roundEndDelay * 2 : roundEndDelay;
                 this.pendingBotAction = setTimeout(() => {
                     this.pendingBotAction = null;
                     this.requestNextRound(bot.userId);
-                }, 8000);
+                }, delay);
                 return;
             }
 
             if (this.state === 'Bidding Phase' && this.biddingTurnPlayerId === bot.userId) {
-                this.pendingBotAction = setTimeout(() => { this.pendingBotAction = null; bot.makeBid(); }, 1000);
+                let delay = isCourtney ? standardDelay * 2 : standardDelay;
+                this.pendingBotAction = setTimeout(() => { this.pendingBotAction = null; bot.makeBid(); }, delay);
                 return;
             }
 
             if (this.state === 'Trump Selection' && this.bidWinnerInfo?.userId === bot.userId && !this.trumpSuit) {
-                this.pendingBotAction = setTimeout(() => { this.pendingBotAction = null; bot.chooseTrump(); }, 1000);
+                let delay = isCourtney ? standardDelay * 2 : standardDelay;
+                this.pendingBotAction = setTimeout(() => { this.pendingBotAction = null; bot.chooseTrump(); }, delay);
                 return;
             }
 
             if (this.state === 'Frog Widow Exchange' && this.bidWinnerInfo?.userId === bot.userId && this.widowDiscardsForFrogBidder.length === 0) {
-                this.pendingBotAction = setTimeout(() => { this.pendingBotAction = null; bot.submitFrogDiscards(); }, 1000);
+                let delay = isCourtney ? standardDelay * 2 : standardDelay;
+                this.pendingBotAction = setTimeout(() => { this.pendingBotAction = null; bot.submitFrogDiscards(); }, delay);
                 return;
             }
 
             if (this.state === 'Playing Phase' && this.trickTurnPlayerId === bot.userId) {
-                this.pendingBotAction = setTimeout(() => { this.pendingBotAction = null; bot.playCard(); }, 1200);
+                let delay = isCourtney ? playDelay * 2 : playDelay;
+                this.pendingBotAction = setTimeout(() => { this.pendingBotAction = null; bot.playCard(); }, delay);
                 return;
             }
         }
