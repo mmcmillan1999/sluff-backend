@@ -765,52 +765,47 @@ class Table {
     
     _triggerBots() {
         if (this.pendingBotAction) return;
-    
-        // Find the bot whose turn it is, if any.
-        const activeBot = this.bots[this.biddingTurnPlayerId] || this.bots[this.trickTurnPlayerId] || this.bots[this.dealer];
 
-        if (!activeBot) return;
+        // --- CORRECTED LOGIC ---
+        // Loop through all bots to find if one should act in the current state.
+        for (const botId in this.bots) {
+            const bot = this.bots[botId];
 
-        // --- NEW --- Case: Bot is the dealer and needs to deal cards.
-        if (this.state === 'Dealing Pending' && this.dealer === activeBot.userId) {
-            this.pendingBotAction = setTimeout(() => {
-                this.pendingBotAction = null;
-                this.dealCards(activeBot.userId);
-            }, 1000);
-            return;
-        }
+            if (this.state === 'Dealing Pending' && this.dealer === bot.userId) {
+                this.pendingBotAction = setTimeout(() => {
+                    this.pendingBotAction = null;
+                    this.dealCards(bot.userId);
+                }, 1000);
+                return; // Action queued, exit.
+            }
 
-        // --- NEW --- Case: Bot was the dealer and needs to start the next round.
-        if (this.state === 'Awaiting Next Round Trigger' && this.roundSummary?.dealerOfRoundId === activeBot.userId) {
-            this.pendingBotAction = setTimeout(() => {
-                this.pendingBotAction = null;
-                this.requestNextRound(activeBot.userId);
-            }, 1000);
-            return;
-        }
+            if (this.state === 'Awaiting Next Round Trigger' && this.roundSummary?.dealerOfRoundId === bot.userId) {
+                this.pendingBotAction = setTimeout(() => {
+                    this.pendingBotAction = null;
+                    this.requestNextRound(bot.userId);
+                }, 1000);
+                return;
+            }
 
-        // Case: Bot's turn to bid.
-        if (this.state === 'Bidding Phase' && this.biddingTurnPlayerId === activeBot.userId) {
-            this.pendingBotAction = setTimeout(() => { this.pendingBotAction = null; activeBot.makeBid(); }, 1000);
-            return;
-        }
+            if (this.state === 'Bidding Phase' && this.biddingTurnPlayerId === bot.userId) {
+                this.pendingBotAction = setTimeout(() => { this.pendingBotAction = null; bot.makeBid(); }, 1000);
+                return;
+            }
 
-        // Case: Bot won the bid and must choose trump.
-        if (this.state === 'Trump Selection' && this.bidWinnerInfo?.userId === activeBot.userId && !this.trumpSuit) {
-            this.pendingBotAction = setTimeout(() => { this.pendingBotAction = null; activeBot.chooseTrump(); }, 1000);
-            return;
-        }
+            if (this.state === 'Trump Selection' && this.bidWinnerInfo?.userId === bot.userId && !this.trumpSuit) {
+                this.pendingBotAction = setTimeout(() => { this.pendingBotAction = null; bot.chooseTrump(); }, 1000);
+                return;
+            }
 
-        // Case: Bot won with Frog and must discard from the widow.
-        if (this.state === 'Frog Widow Exchange' && this.bidWinnerInfo?.userId === activeBot.userId && this.widowDiscardsForFrogBidder.length === 0) {
-            this.pendingBotAction = setTimeout(() => { this.pendingBotAction = null; activeBot.submitFrogDiscards(); }, 1000);
-            return;
-        }
+            if (this.state === 'Frog Widow Exchange' && this.bidWinnerInfo?.userId === bot.userId && this.widowDiscardsForFrogBidder.length === 0) {
+                this.pendingBotAction = setTimeout(() => { this.pendingBotAction = null; bot.submitFrogDiscards(); }, 1000);
+                return;
+            }
 
-        // Case: Bot's turn to play a card.
-        if (this.state === 'Playing Phase' && this.trickTurnPlayerId === activeBot.userId) {
-            this.pendingBotAction = setTimeout(() => { this.pendingBotAction = null; activeBot.playCard(); }, 1200);
-            return;
+            if (this.state === 'Playing Phase' && this.trickTurnPlayerId === bot.userId) {
+                this.pendingBotAction = setTimeout(() => { this.pendingBotAction = null; bot.playCard(); }, 1200);
+                return;
+            }
         }
     }
     _clearAllTimers() { for (const timer in this.internalTimers) { clearTimeout(this.internalTimers[timer]); clearInterval(this.internalTimers[timer]); } this.internalTimers = {}; }
