@@ -118,13 +118,16 @@ function calculateDrawSplitPayout(table) {
 }
 
 function calculateRoundScoreDetails(table) {
-    const { bidWinnerInfo, playerOrderActive, playerMode, capturedTricks, widowDiscardsForFrogBidder, originalDealtWidow, insurance } = table;
+    const { bidWinnerInfo, playerOrderActive, playerMode, capturedTricks, widowDiscardsForFrogBidder, originalDealtWidow, insurance, players } = table;
     const bidWinnerName = bidWinnerInfo.playerName;
     const bidType = bidWinnerInfo.bid;
     const currentBidMultiplier = BID_MULTIPLIERS[bidType];
     
+    // --- BUG FIX --- Convert active player IDs to an array of player names for scoring.
+    const activePlayerNames = playerOrderActive.map(id => players[id].playerName);
+
     let bidderTotalCardPoints = 0;
-    playerOrderActive.forEach(pName => {
+    activePlayerNames.forEach(pName => {
         const capturedCards = (capturedTricks[pName] || []).flat();
         const playerTrickPoints = calculateCardPoints(capturedCards);
         if (pName === bidWinnerName) {
@@ -145,7 +148,7 @@ function calculateRoundScoreDetails(table) {
 
     let roundMessage = "";
     const pointChanges = {};
-    playerOrderActive.forEach(p => pointChanges[p] = 0);
+    activePlayerNames.forEach(p => pointChanges[p] = 0);
     if(playerMode === 3) pointChanges[PLACEHOLDER_ID] = 0;
 
     if (insurance.dealExecuted) {
@@ -162,7 +165,7 @@ function calculateRoundScoreDetails(table) {
             roundMessage = `${bidWinnerName} scored exactly 60. No points exchanged.`; 
         } else if (bidderTotalCardPoints > 60) {
             let totalPointsGained = 0;
-            playerOrderActive.forEach(pName => { 
+            activePlayerNames.forEach(pName => { 
                 if (pName !== bidWinnerName) { 
                     pointChanges[pName] -= exchangeValue; 
                     totalPointsGained += exchangeValue; 
@@ -172,7 +175,7 @@ function calculateRoundScoreDetails(table) {
             roundMessage = `${bidWinnerName} succeeded! Gains ${totalPointsGained} points.`;
         } else { // Bidder failed
             let totalPointsLost = 0;
-            const activeOpponents = playerOrderActive.filter(pName => pName !== bidWinnerName);
+            const activeOpponents = activePlayerNames.filter(pName => pName !== bidWinnerName);
             activeOpponents.forEach(oppName => { 
                 pointChanges[oppName] += exchangeValue; 
                 totalPointsLost += exchangeValue; 
@@ -195,7 +198,6 @@ function calculateRoundScoreDetails(table) {
     
     const insuranceHindsight = calculateInsuranceHindsight(table, bidderTotalCardPoints, currentBidMultiplier);
 
-    // --- MODIFICATION: Return the final, fully calculated points ---
     const finalBidderPoints = bidderTotalCardPoints;
     const finalDefenderPoints = 120 - finalBidderPoints;
 
@@ -221,8 +223,9 @@ async function handleGameOver(table, pool) {
         const statPromises = [];
 
         const finalPlayerScores = playerOrderActive
-            .map(pName => ({ name: pName, score: scores[pName], userId: Object.values(players).find(p=>p.playerName === pName)?.userId }))
-            .filter(p => p.userId >= 0)
+            .map(id => players[id]) // --- BUG FIX --- Use IDs to get player objects
+            .filter(p => p && !p.isBot) // Filter out bots
+            .map(p => ({ name: p.playerName, score: scores[p.playerName], userId: p.userId }))
             .sort((a, b) => b.score - a.score);
         
         if (finalPlayerScores.length === 3) {
@@ -269,10 +272,11 @@ async function handleGameOver(table, pool) {
 
 function calculateInsuranceHindsight(table, bidderTotalCardPoints, currentBidMultiplier) {
     if (table.playerMode !== 3) return null;
-    const { playerOrderActive, bidWinnerInfo, insurance } = table;
+    const { playerOrderActive, bidWinnerInfo, insurance, players } = table; // --- BUG FIX --- Add players
     const bidWinnerName = bidWinnerInfo.playerName;
     const insuranceHindsight = {};
-    const defenders = playerOrderActive.filter(p => p !== bidWinnerName);
+    const activePlayerNames = playerOrderActive.map(id => players[id].playerName); // --- BUG FIX --- Use names
+    const defenders = activePlayerNames.filter(p => p !== bidWinnerName);
     const outcomeFromCards = {};
     const scoreDifferenceFrom60 = bidderTotalCardPoints - 60;
     const exchangeValue = Math.abs(scoreDifferenceFrom60) * currentBidMultiplier;
@@ -283,7 +287,7 @@ function calculateInsuranceHindsight(table, bidderTotalCardPoints, currentBidMul
         outcomeFromCards[bidWinnerName] = -(exchangeValue * 2);
         defenders.forEach(def => outcomeFromCards[def] = exchangeValue);
     } else {
-         playerOrderActive.forEach(p => outcomeFromCards[p] = 0);
+         activePlayerNames.forEach(p => outcomeFromCards[p] = 0);
     }
     const potentialOutcomeFromDeal = {};
     const sumOfFinalOffers = Object.values(insurance.defenderOffers).reduce((sum, offer) => sum + offer, 0);
@@ -298,7 +302,7 @@ function calculateInsuranceHindsight(table, bidderTotalCardPoints, currentBidMul
             actualOutcomeFromDeal[defName] = -agreement.defenderOffers[defName];
        }
     }
-    playerOrderActive.forEach(pName => {
+    activePlayerNames.forEach(pName => {
         let actualPoints, potentialPoints;
         if (insurance.dealExecuted) {
             actualPoints = actualOutcomeFromDeal[pName];
