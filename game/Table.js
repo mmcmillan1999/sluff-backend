@@ -766,8 +766,6 @@ class Table {
     _triggerBots() {
         if (this.pendingBotAction) return;
 
-        // --- CORRECTED LOGIC ---
-        // Loop through all bots to find if one should act in the current state.
         for (const botId in this.bots) {
             const bot = this.bots[botId];
 
@@ -776,14 +774,15 @@ class Table {
                     this.pendingBotAction = null;
                     this.dealCards(bot.userId);
                 }, 1000);
-                return; // Action queued, exit.
+                return;
             }
 
             if (this.state === 'Awaiting Next Round Trigger' && this.roundSummary?.dealerOfRoundId === bot.userId) {
+                // --- MODIFICATION: Increased delay to 8 seconds ---
                 this.pendingBotAction = setTimeout(() => {
                     this.pendingBotAction = null;
                     this.requestNextRound(bot.userId);
-                }, 1000);
+                }, 8000);
                 return;
             }
 
