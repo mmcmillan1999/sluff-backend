@@ -6,6 +6,9 @@ const BotPlayer = require('./BotPlayer');
 const transactionManager = require('../db/transactionManager');
 const { shuffle } = require('../utils/shuffle');
 
+// --- NEW --- Predefined names for the bots.
+const BOT_NAMES = ["Mike Knight", "Grandma Joe", "Grampa Blane"];
+
 class Table {
     constructor(tableId, theme, tableName, io, pool, emitLobbyUpdateCallback) {
         this.io = io;
@@ -17,7 +20,7 @@ class Table {
         this.serverVersion = SERVER_VERSION;
         this.state = "Waiting for Players";
         this.players = {};
-        this.playerOrderActive = [];
+        this.playerOrderActive = []; // --- MODIFIED --- Will now store user IDs instead of names.
         this.scores = {};
         this.gameStarted = false;
         this.gameId = null;
@@ -97,18 +100,38 @@ class Table {
         this.emitLobbyUpdateCallback();
     }
 
-    addBotPlayer(name = 'Lee') {
+    addBotPlayer() {
+        const currentPlayers = Object.values(this.players).filter(p => !p.isSpectator);
+        if (currentPlayers.length >= 4) return;
+
+        const currentNames = new Set(currentPlayers.map(p => p.playerName));
+        let botName = "Bot";
+        for (const name of BOT_NAMES) {
+            if (!currentNames.has(name)) {
+                botName = name;
+                break;
+            }
+        }
+        // Fallback if all predefined names are taken
+        if (currentNames.has(botName)) {
+            let i = 1;
+            while (currentNames.has(`Bot #${i}`)) {
+                i++;
+            }
+            botName = `Bot #${i}`;
+        }
+        
         const botId = this._nextBotId--;
         this.players[botId] = {
             userId: botId,
-            playerName: name,
+            playerName: botName,
             socketId: null,
             isSpectator: false,
             disconnected: false,
             isBot: true
         };
-        this.bots[botId] = new BotPlayer(botId, name, this);
-        if (!this.scores[name]) this.scores[name] = 120;
+        this.bots[botId] = new BotPlayer(botId, botName, this);
+        if (!this.scores[botName]) this.scores[botName] = 120;
         this._recalculateActivePlayerOrder();
         const activePlayers = this.playerOrderActive.length;
         if (activePlayers >= 3 && !this.gameStarted) this.state = 'Ready to Start';
@@ -224,44 +247,56 @@ class Table {
     dealCards(requestingUserId) {
         if (this.state !== "Dealing Pending" || requestingUserId !== this.dealer) return;
         const shuffledDeck = shuffle([...deck]);
-        this.playerOrderActive.forEach((pName, i) => { this.hands[pName] = shuffledDeck.slice(i * 11, (i + 1) * 11); });
+        this.playerOrderActive.forEach((playerId, i) => {
+            const playerName = this.players[playerId].playerName;
+            this.hands[playerName] = shuffledDeck.slice(i * 11, (i + 1) * 11);
+        });
         this.widow = shuffledDeck.slice(11 * this.playerOrderActive.length);
         this.originalDealtWidow = [...this.widow];
         this.state = "Bidding Phase";
-        this.biddingTurnPlayerName = this.playerOrderActive[0];
+        this.biddingTurnPlayerId = this.playerOrderActive[0];
         this._emitUpdate();
     }
 
     placeBid(userId, bid) {
+        if (userId !== this.biddingTurnPlayerId) return;
         const player = this.players[userId];
-        if (!player || player.playerName !== this.biddingTurnPlayerName) return;
+        if (!player) return;
+
         if (this.state === "Awaiting Frog Upgrade Decision") {
             if (userId !== this.originalFrogBidderId || (bid !== "Heart Solo" && bid !== "Pass")) return;
             if (bid === "Heart Solo") { this.currentHighestBidDetails = { userId, playerName: player.playerName, bid: "Heart Solo" }; }
-            this.biddingTurnPlayerName = null;
+            this.biddingTurnPlayerId = null;
             this._resolveBiddingFinal();
             return;
         }
-        if (this.state !== "Bidding Phase" || !BID_HIERARCHY.includes(bid) || this.playersWhoPassedThisRound.includes(player.playerName)) return;
+        if (this.state !== "Bidding Phase" || !BID_HIERARCHY.includes(bid) || this.playersWhoPassedThisRound.includes(userId)) return;
+        
         const currentHighestBidIndex = this.currentHighestBidDetails ? BID_HIERARCHY.indexOf(this.currentHighestBidDetails.bid) : -1;
         if (bid !== "Pass" && BID_HIERARCHY.indexOf(bid) <= currentHighestBidIndex) return;
+        
         if (bid !== "Pass") {
             this.currentHighestBidDetails = { userId, playerName: player.playerName, bid };
             if (bid === "Frog" && !this.originalFrogBidderId) this.originalFrogBidderId = userId;
             if (bid === "Solo" && this.originalFrogBidderId && userId !== this.originalFrogBidderId) this.soloBidMadeAfterFrog = true;
-        } else { this.playersWhoPassedThisRound.push(player.playerName); }
-        const activeBiddersRemaining = this.playerOrderActive.filter(name => !this.playersWhoPassedThisRound.includes(name));
+        } else { this.playersWhoPassedThisRound.push(userId); }
+        
+        const activeBiddersRemaining = this.playerOrderActive.filter(id => !this.playersWhoPassedThisRound.includes(id));
         if ((this.currentHighestBidDetails && activeBiddersRemaining.length <= 1) || this.playersWhoPassedThisRound.length === this.playerOrderActive.length) {
-            this.biddingTurnPlayerName = null;
+            this.biddingTurnPlayerId = null;
             this._checkForFrogUpgrade();
         } else {
-            let currentBidderIndex = this.playerOrderActive.indexOf(player.playerName);
-            let nextBidderName = null;
+            let currentBidderIndex = this.playerOrderActive.indexOf(userId);
+            let nextBidderId = null;
             for (let i = 1; i < this.playerOrderActive.length; i++) {
-                let potentialNextBidder = this.playerOrderActive[(currentBidderIndex + i) % this.playerOrderActive.length];
-                if (!this.playersWhoPassedThisRound.includes(potentialNextBidder)) { nextBidderName = potentialNextBidder; break; }
+                let potentialNextBidderId = this.playerOrderActive[(currentBidderIndex + i) % this.playerOrderActive.length];
+                if (!this.playersWhoPassedThisRound.includes(potentialNextBidderId)) {
+                    nextBidderId = potentialNextBidderId;
+                    break;
+                }
             }
-            if (nextBidderName) { this.biddingTurnPlayerName = nextBidderName; } else { this._checkForFrogUpgrade(); }
+            if (nextBidderId) { this.biddingTurnPlayerId = nextBidderId; }
+            else { this._checkForFrogUpgrade(); }
         }
         this._emitUpdate();
     }
@@ -289,10 +324,13 @@ class Table {
     }
 
     playCard(userId, card) {
+        if (userId !== this.trickTurnPlayerId) return;
         const player = this.players[userId];
-        if (!player || this.state !== "Playing Phase" || player.playerName !== this.trickTurnPlayerName) return;
+        if (!player) return;
+
         const hand = this.hands[player.playerName];
         if (!hand || !hand.includes(card)) return;
+        
         const isLeading = this.currentTrickCards.length === 0;
         const playedSuit = gameLogic.getSuit(card);
         if (isLeading) {
@@ -307,11 +345,13 @@ class Table {
         this.currentTrickCards.push({ userId, playerName: player.playerName, card });
         if (isLeading) this.leadSuitCurrentTrick = playedSuit;
         if (playedSuit === this.trumpSuit) this.trumpBroken = true;
+        
         const expectedCardsInTrick = this.playerOrderActive.length;
-        if (this.currentTrickCards.length === expectedCardsInTrick) { this._resolveTrick(); }
-        else {
-            const currentTurnPlayerIndex = this.playerOrderActive.indexOf(player.playerName);
-            this.trickTurnPlayerName = this.playerOrderActive[(currentTurnPlayerIndex + 1) % expectedCardsInTrick];
+        if (this.currentTrickCards.length === expectedCardsInTrick) {
+            this._resolveTrick();
+        } else {
+            const currentTurnPlayerIndex = this.playerOrderActive.indexOf(userId);
+            this.trickTurnPlayerId = this.playerOrderActive[(currentTurnPlayerIndex + 1) % expectedCardsInTrick];
             this._emitUpdate();
         }
     }
@@ -559,18 +599,21 @@ class Table {
         }
 
         this.tricksPlayedCount++;
-        this.trickLeaderName = winnerInfo.playerName;
-        if (winnerInfo.playerName && !this.capturedTricks[winnerInfo.playerName]) { this.capturedTricks[winnerInfo.playerName] = []; }
-        if (winnerInfo.playerName) { this.capturedTricks[winnerInfo.playerName].push(this.currentTrickCards.map(p => p.card)); }
-        if (this.tricksPlayedCount === 11) { this._calculateRoundScores(); }
-        else {
+        this.trickLeaderId = winnerInfo.userId;
+        const winnerName = winnerInfo.playerName;
+        if (winnerName && !this.capturedTricks[winnerName]) { this.capturedTricks[winnerName] = []; }
+        if (winnerName) { this.capturedTricks[winnerName].push(this.currentTrickCards.map(p => p.card)); }
+        
+        if (this.tricksPlayedCount === 11) {
+            this._calculateRoundScores();
+        } else {
             this.state = "TrickCompleteLinger";
             this._emitUpdate();
             this.internalTimers.trickLinger = setTimeout(() => {
                 if (this.state === "TrickCompleteLinger") {
                     this.currentTrickCards = [];
                     this.leadSuitCurrentTrick = null;
-                    this.trickTurnPlayerName = winnerInfo.playerName;
+                    this.trickTurnPlayerId = winnerInfo.userId;
                     this.state = "Playing Phase";
                     this._emitUpdate();
                 }
@@ -611,7 +654,7 @@ class Table {
     _checkForFrogUpgrade() {
         if (this.soloBidMadeAfterFrog && this.originalFrogBidderId) {
             this.state = "Awaiting Frog Upgrade Decision";
-            this.biddingTurnPlayerName = this.players[this.originalFrogBidderId]?.playerName;
+            this.biddingTurnPlayerId = this.originalFrogBidderId;
         } else { this._resolveBiddingFinal(); }
         this._emitUpdate();
     }
@@ -623,15 +666,15 @@ class Table {
         this.currentTrickCards = [];
         this.leadSuitCurrentTrick = null;
         this.lastCompletedTrick = null;
-        this.trickLeaderName = this.bidWinnerInfo.playerName;
-        this.trickTurnPlayerName = this.bidWinnerInfo.playerName;
+        this.trickLeaderId = this.bidWinnerInfo.userId;
+        this.trickTurnPlayerId = this.bidWinnerInfo.userId;
         if (this.playerMode === 3) {
             this.insurance.isActive = true;
             const multiplier = BID_MULTIPLIERS[this.bidWinnerInfo.bid];
             this.insurance.bidMultiplier = multiplier;
             this.insurance.bidderPlayerName = this.bidWinnerInfo.playerName;
             this.insurance.bidderRequirement = 120 * multiplier;
-            const defenders = this.playerOrderActive.filter(pName => pName !== this.bidWinnerInfo.playerName);
+            const defenders = this.playerOrderActive.map(id => this.players[id].playerName).filter(pName => pName !== this.bidWinnerInfo.playerName);
             defenders.forEach(defName => { this.insurance.defenderOffers[defName] = -60 * multiplier; });
         }
         this._emitUpdate();
@@ -639,18 +682,19 @@ class Table {
     
     _advanceRound() {
         if (!this.gameStarted) return;
-        const newDealerName = this.playerOrderActive.shift();
-        this.playerOrderActive.push(newDealerName);
-        const newDealer = Object.values(this.players).find(p => p.playerName === newDealerName);
-        if (!newDealer) {
+        const oldDealerId = this.playerOrderActive.shift();
+        this.playerOrderActive.push(oldDealerId);
+        this.dealer = this.playerOrderActive[0];
+        
+        if (!this.players[this.dealer]) {
             console.error(`[${this.tableId}] FATAL: Could not find new dealer. Resetting table.`);
             this.reset();
             return;
         }
-        this.dealer = newDealer.userId;
+
         this._initializeNewRoundState();
         this.state = "Dealing Pending";
-        console.log(`[${this.tableId}] Round advanced. New dealer: ${newDealerName}. State: ${this.state}`);
+        console.log(`[${this.tableId}] Round advanced. New dealer: ${this.players[this.dealer].playerName}. State: ${this.state}`);
         this._emitUpdate();
     }
     
@@ -665,9 +709,11 @@ class Table {
             const gameOverResult = await gameLogic.handleGameOver(this, this.pool);
             gameWinnerName = gameOverResult.gameWinnerName;
             Object.values(this.players).forEach(p => { 
-                const playerSocket = this.io.sockets.sockets.get(p.socketId);
-                if (playerSocket) {
-                    playerSocket.emit("requestUserSync"); 
+                if (!p.isBot) {
+                    const playerSocket = this.io.sockets.sockets.get(p.socketId);
+                    if (playerSocket) {
+                        playerSocket.emit("requestUserSync"); 
+                    }
                 }
             });
         }
@@ -684,23 +730,32 @@ class Table {
             const playerUserIds = activePlayers.map(p => p.userId);
             let dealerIndex = playerUserIds.indexOf(this.dealer);
             if (dealerIndex === -1) { this.dealer = playerUserIds[0]; dealerIndex = 0; }
-            const orderedNames = [];
+            const orderedIds = [];
             for (let i = 1; i <= playerUserIds.length; i++) { 
                 const playerId = playerUserIds[(dealerIndex + i) % playerUserIds.length]; 
                 if (this.players[playerId]) {
-                    orderedNames.push(this.players[playerId].playerName); 
+                    orderedIds.push(playerId); 
                 }
             }
-            this.playerOrderActive = orderedNames;
-        } else { this.playerOrderActive = activePlayers.map(p => p.playerName).sort(); }
+            this.playerOrderActive = orderedIds;
+        } else { this.playerOrderActive = activePlayers.map(p => p.userId).sort((a,b) => a - b); }
     }
 
     getStateForClient() {
-        return {
-            tableId: this.tableId, tableName: this.tableName, theme: this.theme, state: this.state, players: this.players, playerOrderActive: this.playerOrderActive, dealer: this.dealer, hands: this.hands, widow: this.widow, originalDealtWidow: this.originalDealtWidow, scores: this.scores, currentHighestBidDetails: this.currentHighestBidDetails, biddingTurnPlayerName: this.biddingTurnPlayerName, bidWinnerInfo: this.bidWinnerInfo, gameStarted: this.gameStarted, trumpSuit: this.trumpSuit, currentTrickCards: this.currentTrickCards, trickTurnPlayerName: this.trickTurnPlayerName, tricksPlayedCount: this.tricksPlayedCount, leadSuitCurrentTrick: this.leadSuitCurrentTrick, trumpBroken: this.trumpBroken, trickLeaderName: this.trickLeaderName, capturedTricks: this.capturedTricks, roundSummary: this.roundSummary, lastCompletedTrick: this.lastCompletedTrick, playersWhoPassedThisRound: this.playersWhoPassedThisRound, playerMode: this.playerMode, serverVersion: this.serverVersion, insurance: this.insurance, forfeiture: this.forfeiture, playerTokens: this.playerTokens, drawRequest: this.drawRequest, originalFrogBidderId: this.originalFrogBidderId, soloBidMadeAfterFrog: this.soloBidMadeAfterFrog, revealedWidowForFrog: this.revealedWidowForFrog, widowDiscardsForFrogBidder: this.widowDiscardsForFrogBidder,
+        const state = {
+            tableId: this.tableId, tableName: this.tableName, theme: this.theme, state: this.state, players: this.players,
+            playerOrderActive: Object.values(this.players)
+                .filter(p => this.playerOrderActive.includes(p.userId))
+                .sort((a, b) => this.playerOrderActive.indexOf(a.userId) - this.playerOrderActive.indexOf(b.userId))
+                .map(p => p.playerName), // Send names to client for UI
+            dealer: this.dealer, hands: this.hands, widow: this.widow, originalDealtWidow: this.originalDealtWidow, scores: this.scores, currentHighestBidDetails: this.currentHighestBidDetails, bidWinnerInfo: this.bidWinnerInfo, gameStarted: this.gameStarted, trumpSuit: this.trumpSuit, currentTrickCards: this.currentTrickCards, tricksPlayedCount: this.tricksPlayedCount, leadSuitCurrentTrick: this.leadSuitCurrentTrick, trumpBroken: this.trumpBroken, capturedTricks: this.capturedTricks, roundSummary: this.roundSummary, lastCompletedTrick: this.lastCompletedTrick, playersWhoPassedThisRound: this.playersWhoPassedThisRound.map(id => this.players[id]?.playerName), playerMode: this.playerMode, serverVersion: this.serverVersion, insurance: this.insurance, forfeiture: this.forfeiture, playerTokens: this.playerTokens, drawRequest: this.drawRequest, originalFrogBidderId: this.originalFrogBidderId, soloBidMadeAfterFrog: this.soloBidMadeAfterFrog, revealedWidowForFrog: this.revealedWidowForFrog, widowDiscardsForFrogBidder: this.widowDiscardsForFrogBidder,
             bidderCardPoints: this.bidderCardPoints,
             defenderCardPoints: this.defenderCardPoints,
         };
+        // Derive player names for client compatibility
+        state.biddingTurnPlayerName = this.players[this.biddingTurnPlayerId]?.playerName;
+        state.trickTurnPlayerName = this.players[this.trickTurnPlayerId]?.playerName;
+        return state;
     }
     
     _emitUpdate() {
@@ -710,31 +765,72 @@ class Table {
     
     _triggerBots() {
         if (this.pendingBotAction) return;
-        for (const botId in this.bots) {
-            const bot = this.bots[botId];
-            if (this.state === 'Bidding Phase' && this.biddingTurnPlayerName === bot.playerName) {
-                this.pendingBotAction = setTimeout(() => { this.pendingBotAction = null; bot.makeBid(); }, 500);
-                break;
-            }
-            if (this.state === 'Trump Selection' && this.bidWinnerInfo?.userId === bot.userId && !this.trumpSuit) {
-                this.pendingBotAction = setTimeout(() => { this.pendingBotAction = null; bot.chooseTrump(); }, 500);
-                break;
-            }
-            if (this.state === 'Frog Widow Exchange' && this.bidWinnerInfo?.userId === bot.userId && this.widowDiscardsForFrogBidder.length === 0) {
-                this.pendingBotAction = setTimeout(() => { this.pendingBotAction = null; bot.submitFrogDiscards(); }, 500);
-                break;
-            }
-            if (this.state === 'Playing Phase' && this.trickTurnPlayerName === bot.playerName) {
-                this.pendingBotAction = setTimeout(() => { this.pendingBotAction = null; bot.playCard(); }, 500);
-                break;
-            }
+    
+        // Find the bot whose turn it is, if any.
+        const activeBot = this.bots[this.biddingTurnPlayerId] || this.bots[this.trickTurnPlayerId] || this.bots[this.dealer];
+
+        if (!activeBot) return;
+
+        // --- NEW --- Case: Bot is the dealer and needs to deal cards.
+        if (this.state === 'Dealing Pending' && this.dealer === activeBot.userId) {
+            this.pendingBotAction = setTimeout(() => {
+                this.pendingBotAction = null;
+                this.dealCards(activeBot.userId);
+            }, 1000);
+            return;
+        }
+
+        // --- NEW --- Case: Bot was the dealer and needs to start the next round.
+        if (this.state === 'Awaiting Next Round Trigger' && this.roundSummary?.dealerOfRoundId === activeBot.userId) {
+            this.pendingBotAction = setTimeout(() => {
+                this.pendingBotAction = null;
+                this.requestNextRound(activeBot.userId);
+            }, 1000);
+            return;
+        }
+
+        // Case: Bot's turn to bid.
+        if (this.state === 'Bidding Phase' && this.biddingTurnPlayerId === activeBot.userId) {
+            this.pendingBotAction = setTimeout(() => { this.pendingBotAction = null; activeBot.makeBid(); }, 500);
+            return;
+        }
+
+        // Case: Bot won the bid and must choose trump.
+        if (this.state === 'Trump Selection' && this.bidWinnerInfo?.userId === activeBot.userId && !this.trumpSuit) {
+            this.pendingBotAction = setTimeout(() => { this.pendingBotAction = null; activeBot.chooseTrump(); }, 500);
+            return;
+        }
+
+        // Case: Bot won with Frog and must discard from the widow.
+        if (this.state === 'Frog Widow Exchange' && this.bidWinnerInfo?.userId === activeBot.userId && this.widowDiscardsForFrogBidder.length === 0) {
+            this.pendingBotAction = setTimeout(() => { this.pendingBotAction = null; activeBot.submitFrogDiscards(); }, 500);
+            return;
+        }
+
+        // Case: Bot's turn to play a card.
+        if (this.state === 'Playing Phase' && this.trickTurnPlayerId === activeBot.userId) {
+            this.pendingBotAction = setTimeout(() => { this.pendingBotAction = null; activeBot.playCard(); }, 500);
+            return;
         }
     }
     _clearAllTimers() { for (const timer in this.internalTimers) { clearTimeout(this.internalTimers[timer]); clearInterval(this.internalTimers[timer]); } this.internalTimers = {}; }
     
     _initializeNewRoundState() {
-        this.hands = {}; this.widow = []; this.originalDealtWidow = []; this.biddingTurnPlayerName = null; this.currentHighestBidDetails = null; this.playersWhoPassedThisRound = []; this.bidWinnerInfo = null; this.trumpSuit = null; this.trumpBroken = false; this.originalFrogBidderId = null; this.soloBidMadeAfterFrog = false; this.revealedWidowForFrog = []; this.widowDiscardsForFrogBidder = []; this.trickTurnPlayerName = null; this.trickLeaderName = null; this.currentTrickCards = []; this.leadSuitCurrentTrick = null; this.lastCompletedTrick = null; this.tricksPlayedCount = 0; this.capturedTricks = {}; this.roundSummary = null; this.insurance = this._getInitialInsuranceState(); this.forfeiture = this._getInitialForfeitureState(); this.drawRequest = this._getInitialDrawRequestState();
-        this.playerOrderActive.forEach(pName => { if (pName && this.scores[pName] !== undefined) { this.capturedTricks[pName] = []; } });
+        this.hands = {}; this.widow = []; this.originalDealtWidow = [];
+        this.biddingTurnPlayerId = null; // --- MODIFIED ---
+        this.currentHighestBidDetails = null;
+        this.playersWhoPassedThisRound = []; // --- MODIFIED --- Will store user IDs
+        this.bidWinnerInfo = null; this.trumpSuit = null; this.trumpBroken = false; this.originalFrogBidderId = null; this.soloBidMadeAfterFrog = false; this.revealedWidowForFrog = []; this.widowDiscardsForFrogBidder = [];
+        this.trickTurnPlayerId = null; // --- MODIFIED ---
+        this.trickLeaderId = null; // --- MODIFIED ---
+        this.currentTrickCards = []; this.leadSuitCurrentTrick = null; this.lastCompletedTrick = null; this.tricksPlayedCount = 0; this.capturedTricks = {}; this.roundSummary = null; this.insurance = this._getInitialInsuranceState(); this.forfeiture = this._getInitialForfeitureState(); this.drawRequest = this._getInitialDrawRequestState();
+        
+        // This logic remains correct as it uses player names as keys
+        Object.values(this.players).forEach(p => {
+            if (p.playerName && this.scores[p.playerName] !== undefined) {
+                this.capturedTricks[p.playerName] = [];
+            }
+        });
         
         this.bidderCardPoints = 0;
         this.defenderCardPoints = 0;
