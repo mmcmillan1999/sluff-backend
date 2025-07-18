@@ -2,6 +2,7 @@
 
 const { SERVER_VERSION, TABLE_COSTS, BID_HIERARCHY, PLACEHOLDER_ID, deck, SUITS, BID_MULTIPLIERS } = require('./constants');
 const gameLogic = require('./logic');
+const BotPlayer = require('./BotPlayer');
 const transactionManager = require('../db/transactionManager');
 const { shuffle } = require('../utils/shuffle');
 
@@ -23,6 +24,9 @@ class Table {
         this.playerMode = null;
         this.dealer = null;
         this.internalTimers = {};
+        this.bots = {};
+        this._nextBotId = -1;
+        this.pendingBotAction = null;
         this._initializeNewRoundState();
     }
     
@@ -93,6 +97,25 @@ class Table {
         this.emitLobbyUpdateCallback();
     }
 
+    addBotPlayer(name = 'Lee') {
+        const botId = this._nextBotId--;
+        this.players[botId] = {
+            userId: botId,
+            playerName: name,
+            socketId: null,
+            isSpectator: false,
+            disconnected: false,
+            isBot: true
+        };
+        this.bots[botId] = new BotPlayer(botId, name, this);
+        if (!this.scores[name]) this.scores[name] = 120;
+        this._recalculateActivePlayerOrder();
+        const activePlayers = this.playerOrderActive.length;
+        if (activePlayers >= 3 && !this.gameStarted) this.state = 'Ready to Start';
+        this._emitUpdate();
+        this.emitLobbyUpdateCallback();
+    }
+
     async leaveTable(userId) {
         if (!this.players[userId]) return;
         const playerInfo = this.players[userId];
@@ -100,6 +123,9 @@ class Table {
         if (safeLeaveStates.includes(this.state) || playerInfo.isSpectator) { delete this.players[userId]; }
         else if (this.gameId && this.gameStarted) { this.disconnectPlayer(userId); }
         else { delete this.players[userId]; }
+        if (playerInfo.isBot) {
+            delete this.bots[userId];
+        }
         this._recalculateActivePlayerOrder();
         await this._syncPlayerTokens(Object.keys(this.players));
         this._emitUpdate();
@@ -151,10 +177,12 @@ class Table {
         }
         this.playerMode = activePlayers.length;
         const activePlayerIds = activePlayers.map(p => p.userId);
+        const humanIds = activePlayers.filter(p => !p.isBot).map(p => p.userId);
         try {
             this.gameId = await transactionManager.createGameRecord(this.pool, this);
-            // --- MODIFICATION: Pass the entire table instance 'this' to the transaction handler ---
-            await transactionManager.handleGameStartTransaction(this.pool, this, activePlayerIds, this.gameId);
+            if (humanIds.length > 0) {
+                await transactionManager.handleGameStartTransaction(this.pool, this, humanIds, this.gameId);
+            }
             this.gameStarted = true;
             activePlayers.forEach(p => { if (this.scores[p.playerName] === undefined) this.scores[p.playerName] = 120; });
             if (this.playerMode === 3 && this.scores[PLACEHOLDER_ID] === undefined) { this.scores[PLACEHOLDER_ID] = 120; }
@@ -302,10 +330,15 @@ class Table {
             const playerInfo = originalPlayers[userId];
             if (!playerInfo.disconnected) {
                 this.players[userId] = { ...playerInfo, isSpectator: false, socketId: playerInfo.socketId };
+                if (playerInfo.isBot) {
+                    this.bots[userId] = new BotPlayer(parseInt(userId,10), playerInfo.playerName, this);
+                }
                 this.scores[playerInfo.playerName] = 120;
                 if (!playerInfo.isSpectator) { playerIdsToKeep.push(parseInt(userId, 10)); }
             }
         }
+        const botIds = Object.keys(this.bots).map(id => parseInt(id,10));
+        this._nextBotId = botIds.length ? Math.min(...botIds) - 1 : -1;
         this._recalculateActivePlayerOrder();
         this.playerMode = this.playerOrderActive.length;
         this.state = this.playerMode >= 3 ? "Ready to Start" : "Waiting for Players";
@@ -466,10 +499,10 @@ class Table {
         this._clearAllTimers();
         try {
             const forfeitingPlayer = Object.values(this.players).find(p => p.playerName === forfeitingPlayerName);
-            const remainingPlayers = Object.values(this.players).filter(p => !p.isSpectator && p.playerName !== forfeitingPlayerName);
+            const remainingPlayers = Object.values(this.players).filter(p => !p.isSpectator && p.playerName !== forfeitingPlayerName && !p.isBot);
             const tokenChanges = gameLogic.calculateForfeitPayout(this, forfeitingPlayerName);
             const transactionPromises = [];
-            if (forfeitingPlayer) {
+            if (forfeitingPlayer && !forfeitingPlayer.isBot) {
                 transactionPromises.push(transactionManager.postTransaction(this.pool, {
                     userId: forfeitingPlayer.userId, gameId: this.gameId, type: 'forfeit_loss',
                     amount: 0, description: `Forfeited game on table ${this.tableName}`
@@ -486,7 +519,7 @@ class Table {
             });
             await Promise.all(transactionPromises);
             const statUpdatePromises = [];
-            if (forfeitingPlayer) {
+            if (forfeitingPlayer && !forfeitingPlayer.isBot) {
                 statUpdatePromises.push(this.pool.query("UPDATE users SET losses = losses + 1 WHERE id = $1", [forfeitingPlayer.userId]));
             }
             remainingPlayers.forEach(player => {
@@ -512,7 +545,7 @@ class Table {
             console.error(`Database error during forfeit resolution for table ${this.tableId}:`, err);
         }
     }
-
+    
     _resolveTrick() {
         const winnerInfo = gameLogic.determineTrickWinner(this.currentTrickCards, this.leadSuitCurrentTrick, this.trumpSuit);
         this.lastCompletedTrick = { cards: [...this.currentTrickCards], winnerName: winnerInfo.playerName };
@@ -670,7 +703,33 @@ class Table {
         };
     }
     
-    _emitUpdate() { this.io.to(this.tableId).emit('gameState', this.getStateForClient()); }
+    _emitUpdate() {
+        this.io.to(this.tableId).emit('gameState', this.getStateForClient());
+        this._triggerBots();
+    }
+    
+    _triggerBots() {
+        if (this.pendingBotAction) return;
+        for (const botId in this.bots) {
+            const bot = this.bots[botId];
+            if (this.state === 'Bidding Phase' && this.biddingTurnPlayerName === bot.playerName) {
+                this.pendingBotAction = setTimeout(() => { this.pendingBotAction = null; bot.makeBid(); }, 500);
+                break;
+            }
+            if (this.state === 'Trump Selection' && this.bidWinnerInfo?.userId === bot.userId && !this.trumpSuit) {
+                this.pendingBotAction = setTimeout(() => { this.pendingBotAction = null; bot.chooseTrump(); }, 500);
+                break;
+            }
+            if (this.state === 'Frog Widow Exchange' && this.bidWinnerInfo?.userId === bot.userId && this.widowDiscardsForFrogBidder.length === 0) {
+                this.pendingBotAction = setTimeout(() => { this.pendingBotAction = null; bot.submitFrogDiscards(); }, 500);
+                break;
+            }
+            if (this.state === 'Playing Phase' && this.trickTurnPlayerName === bot.playerName) {
+                this.pendingBotAction = setTimeout(() => { this.pendingBotAction = null; bot.playCard(); }, 500);
+                break;
+            }
+        }
+    }
     _clearAllTimers() { for (const timer in this.internalTimers) { clearTimeout(this.internalTimers[timer]); clearInterval(this.internalTimers[timer]); } this.internalTimers = {}; }
     
     _initializeNewRoundState() {
@@ -683,6 +742,8 @@ class Table {
 
     async _syncPlayerTokens(playerIds) {
         if (!playerIds || playerIds.length === 0) { this.playerTokens = {}; return; }
+        playerIds = playerIds.filter(id => parseInt(id,10) >= 0);
+        if (playerIds.length === 0) { this.playerTokens = {}; return; }
         try {
             const tokenQuery = `SELECT user_id, SUM(amount) as tokens FROM transactions WHERE user_id = ANY($1::int[]) GROUP BY user_id;`;
             const tokenResult = await this.pool.query(tokenQuery, [playerIds]);

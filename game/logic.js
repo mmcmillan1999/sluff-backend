@@ -222,6 +222,7 @@ async function handleGameOver(table, pool) {
 
         const finalPlayerScores = playerOrderActive
             .map(pName => ({ name: pName, score: scores[pName], userId: Object.values(players).find(p=>p.playerName === pName)?.userId }))
+            .filter(p => p.userId >= 0)
             .sort((a, b) => b.score - a.score);
         
         if (finalPlayerScores.length === 3) {

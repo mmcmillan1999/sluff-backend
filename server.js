@@ -85,6 +85,11 @@ io.on("connection", (socket) => {
         socket.emit("lobbyState", state.getLobbyState());
     });
 
+    socket.on("addBot", ({ tableId, name }) => {
+        const table = state.getTableById(tableId);
+        if (table) table.addBotPlayer(name || 'Lee');
+    });
+
     socket.on("startGame", ({ tableId }) => {
         const table = state.getTableById(tableId);
         if (table) table.startGame(socket.user.id);
