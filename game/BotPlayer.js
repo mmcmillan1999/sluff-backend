@@ -1,6 +1,6 @@
 const gameLogic = require('./logic');
 const { RANKS_ORDER, BID_HIERARCHY } = require('./constants');
-const { getLegalMoves } = require('./legalMoves');
+const { getLegalMoves } = require('./legalMoves'); // --- MODIFIED: Import the new logic ---
 
 // Helper function to get the rank value of a card for sorting.
 const getRankValue = (card) => RANKS_ORDER.indexOf(gameLogic.getRank(card));
@@ -90,6 +90,8 @@ class BotPlayer {
         const hand = this.table.hands[this.playerName];
         if (!hand || hand.length === 0) return;
 
+        // --- MODIFICATION: The entire card selection logic is now refactored ---
+
         // 1. Get all legal moves first. This prevents the bot from ever getting stuck.
         const isLeading = this.table.currentTrickCards.length === 0;
         const legalPlays = getLegalMoves(
@@ -100,6 +102,7 @@ class BotPlayer {
             this.table.trumpBroken
         );
 
+        // If for some reason there are no legal plays, exit to prevent a crash.
         if (legalPlays.length === 0) {
             console.error(`[${this.table.tableId}] Bot ${this.playerName} has no legal moves from hand: ${hand.join(', ')}`);
             return;
