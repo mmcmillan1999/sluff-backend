@@ -6,8 +6,14 @@ const BotPlayer = require('./BotPlayer');
 const transactionManager = require('../db/transactionManager');
 const { shuffle } = require('../utils/shuffle');
 
-// --- NEW --- Predefined names for the bots.
-const BOT_NAMES = ["Mike Knight", "Grandma Joe", "Grampa Blane", "Kimba", "Courtney Sr.", "Cliff"];
+// --- MODIFIED --- Expanded the list of predefined bot names with the new list.
+const BOT_NAMES = [
+    "Michael Jr.", "George Charles Watts Sr.", "Verl Fayette Sr.", "George",
+    "Courtney", "Verl Fayette Jr.", "Bob Lynn", "Wendell Taylor",
+    "Dutch Woolstenhulme", "Ken Woolstenhulme", "Alfred", "Joe Colete",
+    "Steve Richins", "Cliff Horning", "Mike Horning", "Jansen Richins",
+    "Steve Knight", "Samson Clyde", "Two-bits", "Blaze", "Jay & Deb"
+];
 
 class Table {
     constructor(tableId, theme, tableName, io, pool, emitLobbyUpdateCallback) {
