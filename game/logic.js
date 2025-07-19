@@ -118,32 +118,20 @@ function calculateDrawSplitPayout(table) {
 }
 
 function calculateRoundScoreDetails(table) {
-    const { bidWinnerInfo, playerOrderActive, playerMode, capturedTricks, widowDiscardsForFrogBidder, originalDealtWidow, insurance, players } = table;
+    const { bidWinnerInfo, playerOrderActive, playerMode, capturedTricks, widowDiscardsForFrogBidder, originalDealtWidow, insurance, players, bidderTotalCardPoints } = table;
     const bidWinnerName = bidWinnerInfo.playerName;
     const bidType = bidWinnerInfo.bid;
     const currentBidMultiplier = BID_MULTIPLIERS[bidType];
     
-    // --- BUG FIX --- Convert active player IDs to an array of player names for scoring.
     const activePlayerNames = playerOrderActive.map(id => players[id].playerName);
-
-    let bidderTotalCardPoints = 0;
-    activePlayerNames.forEach(pName => {
-        const capturedCards = (capturedTricks[pName] || []).flat();
-        const playerTrickPoints = calculateCardPoints(capturedCards);
-        if (pName === bidWinnerName) {
-            bidderTotalCardPoints += playerTrickPoints;
-        }
-    });
     
     let widowPoints = 0;
     let widowForReveal = [...originalDealtWidow];
     if (bidType === "Frog") {
         widowPoints = calculateCardPoints(widowDiscardsForFrogBidder);
         widowForReveal = [...widowDiscardsForFrogBidder];
-        bidderTotalCardPoints += widowPoints;
     } else if (bidType === "Solo" || bidType === "Heart Solo") {
         widowPoints = calculateCardPoints(originalDealtWidow);
-        bidderTotalCardPoints += widowPoints;
     }
 
     let roundMessage = "";
@@ -167,7 +155,8 @@ function calculateRoundScoreDetails(table) {
             let totalPointsGained = 0;
             activePlayerNames.forEach(pName => { 
                 if (pName !== bidWinnerName) { 
-                    pointChanges[pName] -= exchangeValue; 
+                    // --- BUG FIX: Each defender only loses the exchange value ---
+                    pointChanges[pName] -= exchangeValue;
                     totalPointsGained += exchangeValue; 
                 } 
             });
@@ -223,8 +212,8 @@ async function handleGameOver(table, pool) {
         const statPromises = [];
 
         const finalPlayerScores = playerOrderActive
-            .map(id => players[id]) // --- BUG FIX --- Use IDs to get player objects
-            .filter(p => p && !p.isBot) // Filter out bots
+            .map(id => players[id])
+            .filter(p => p && !p.isBot)
             .map(p => ({ name: p.playerName, score: scores[p.playerName], userId: p.userId }))
             .sort((a, b) => b.score - a.score);
         
@@ -272,10 +261,10 @@ async function handleGameOver(table, pool) {
 
 function calculateInsuranceHindsight(table, bidderTotalCardPoints, currentBidMultiplier) {
     if (table.playerMode !== 3) return null;
-    const { playerOrderActive, bidWinnerInfo, insurance, players } = table; // --- BUG FIX --- Add players
+    const { playerOrderActive, bidWinnerInfo, insurance, players } = table;
     const bidWinnerName = bidWinnerInfo.playerName;
     const insuranceHindsight = {};
-    const activePlayerNames = playerOrderActive.map(id => players[id].playerName); // --- BUG FIX --- Use names
+    const activePlayerNames = playerOrderActive.map(id => players[id].playerName);
     const defenders = activePlayerNames.filter(p => p !== bidWinnerName);
     const outcomeFromCards = {};
     const scoreDifferenceFrom60 = bidderTotalCardPoints - 60;
